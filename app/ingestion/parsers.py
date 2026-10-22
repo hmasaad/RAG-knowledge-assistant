@@ -1,29 +1,20 @@
-"""Extract text from PDF, Markdown, and plain-text uploads."""
+"""Extract text from PDF, Markdown, text, AsciiDoc, and source uploads."""
 
 import pymupdf
 
 from app.ingestion.errors import IngestionError
 from app.ingestion.models import ParsedDocument, ParsedPage
-
-_TEXT_TYPES = {
-    ".md": "text/markdown",
-    ".markdown": "text/markdown",
-    ".txt": "text/plain",
-    ".text": "text/plain",
-}
+from app.security.uploads import UNSUPPORTED_TYPE, content_type_for
 
 
 def parse_document(filename: str, data: bytes) -> ParsedDocument:
     """Extract text pages from an already validated upload."""
     extension = "." + filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
-    if extension == ".pdf":
-        return _parse_pdf(data)
-    content_type = _TEXT_TYPES.get(extension)
+    content_type = content_type_for(extension)
     if content_type is None:
-        raise IngestionError(
-            "Unsupported file type. Upload a PDF, Markdown, or text file.",
-            status_code=415,
-        )
+        raise IngestionError(UNSUPPORTED_TYPE, status_code=415)
+    if content_type == "application/pdf":
+        return _parse_pdf(data)
     return ParsedDocument(
         content_type=content_type,
         pages=[ParsedPage(number=None, text=_decode_utf8(data))],

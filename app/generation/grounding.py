@@ -9,7 +9,8 @@ from app.security.prompts import REFUSAL_TEXT
 _MARKER = re.compile(r"\[(\d+)\]")
 _QUOTE_LIMIT = 500
 _BOILERPLATE = {"documents", "disagree", "document"}
-_SUPPORT_THRESHOLD = 0.6
+SUPPORT_THRESHOLD = 0.6
+_SUPPORT_THRESHOLD = SUPPORT_THRESHOLD
 
 
 class Citation:
@@ -45,6 +46,8 @@ class AnswerResult:
         citations: list[Citation],
         passages: list[RankedPassage],
         conflict: bool = False,
+        action: str = "answer",
+        trace_id: str = "",
     ) -> None:
         self.query = query
         self.answer = answer
@@ -52,6 +55,8 @@ class AnswerResult:
         self.citations = citations
         self.passages = passages
         self.conflict = conflict
+        self.action = action
+        self.trace_id = trace_id
 
 
 def interpret_model_answer(
@@ -106,6 +111,23 @@ def is_refusal(text: str) -> bool:
     )
 
 
+def claim_support(claim: str, passage: str) -> float | None:
+    """Share of the claim's content words that appear in the passage.
+
+    Short words and the conflict boilerplate are ignored. ``None`` means the
+    claim has no content words left to check.
+    """
+    tokens = [
+        token
+        for token in content_tokens(claim)
+        if len(token) >= 4 and token not in _BOILERPLATE
+    ]
+    if not tokens:
+        return None
+    haystack = set(content_tokens(passage))
+    return sum(1 for token in tokens if token in haystack) / len(tokens)
+
+
 def _citations_are_faithful(
     answer: str,
     passages: list[RankedPassage],
@@ -116,18 +138,12 @@ def _citations_are_faithful(
     for claim, number in _segments(answer):
         if number not in numbers:
             continue
-        tokens = [
-            token
-            for token in content_tokens(claim)
-            if len(token) >= 4 and token not in _BOILERPLATE
-        ]
-        if not tokens:
+        ratio = claim_support(claim, passages[number - 1].model_text())
+        if ratio is None:
             continue
-        haystack = set(content_tokens(passages[number - 1].model_text()))
-        matched = sum(1 for token in tokens if token in haystack)
-        if matched / len(tokens) < _SUPPORT_THRESHOLD:
+        if ratio < _SUPPORT_THRESHOLD:
             return False
-        supported += matched
+        supported += 1
     return supported > 0
 
 

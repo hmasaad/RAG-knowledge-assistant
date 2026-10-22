@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app.ingestion.graph import GraphEdge, is_path
 from app.ingestion.models import DocumentRecord, JobRecord, VersionRecord
 
 _SCHEMA = """
@@ -59,8 +60,23 @@ CREATE TABLE IF NOT EXISTS embedding_cache (
 );
 CREATE TABLE IF NOT EXISTS catalog_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    generation INTEGER NOT NULL
+    generation INTEGER NOT NULL,
+    embedding_model TEXT,
+    embedding_dimension INTEGER
 );
+CREATE TABLE IF NOT EXISTS graph_edges (
+    document_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    relation TEXT NOT NULL,
+    target TEXT NOT NULL,
+    target_key TEXT NOT NULL,
+    chunk_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_key);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_key);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_document ON graph_edges(document_id);
 """
 
 
@@ -161,6 +177,78 @@ class MetadataStore:
                 "SELECT generation FROM catalog_state WHERE id = 1"
             ).fetchone()
         return int(row["generation"]) if row else 1
+
+    def embedding_identity(self) -> tuple[str, int] | None:
+        """Model name and vector width stored with the current collection."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT embedding_model, embedding_dimension
+                FROM catalog_state
+                WHERE id = 1
+                """
+            ).fetchone()
+        if row is None or row["embedding_model"] is None or row["embedding_dimension"] is None:
+            return None
+        return str(row["embedding_model"]), int(row["embedding_dimension"])
+
+    def assert_embedding_compatible(self, model: str, dimension: int) -> None:
+        from app.ingestion.errors import IngestionError
+
+        current = self.embedding_identity()
+        if current is None or current == (model, dimension):
+            return
+        stored_model, stored_dimension = current
+        raise IngestionError(
+            (
+                f"The collection was embedded with {stored_model} ({stored_dimension} dimensions). "
+                f"The active model is {model} ({dimension} dimensions). "
+                "Migrate embeddings before indexing."
+            ),
+            status_code=409,
+        )
+
+    def record_embedding(self, model: str, dimension: int, *, replace: bool = False) -> None:
+        from app.ingestion.errors import IngestionError
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT embedding_model, embedding_dimension
+                FROM catalog_state WHERE id = 1
+                """
+            ).fetchone()
+            current = None
+            if (
+                row is not None
+                and row["embedding_model"] is not None
+                and row["embedding_dimension"] is not None
+            ):
+                current = (str(row["embedding_model"]), int(row["embedding_dimension"]))
+            if current == (model, dimension):
+                if replace:
+                    _bump(connection)
+                return
+            if current is not None and not replace:
+                stored_model, stored_dimension = current
+                raise IngestionError(
+                    (
+                        f"The collection was embedded with {stored_model} ({stored_dimension} dimensions). "
+                        f"The active model is {model} ({dimension} dimensions). "
+                        "Migrate embeddings before indexing."
+                    ),
+                    status_code=409,
+                )
+            connection.execute(
+                """
+                UPDATE catalog_state
+                SET embedding_model = ?, embedding_dimension = ?
+                WHERE id = 1
+                """,
+                (model, dimension),
+            )
+            if replace:
+                _bump(connection)
 
     def create_document(
         self,
@@ -517,11 +605,78 @@ class MetadataStore:
                 "DELETE FROM document_versions WHERE document_id = ?",
                 (document_id,),
             )
+            connection.execute("DELETE FROM graph_edges WHERE document_id = ?", (document_id,))
             cursor = connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
             deleted = cursor.rowcount > 0
             if deleted:
+                remaining = connection.execute(
+                    "SELECT COUNT(*) AS count FROM documents WHERE indexed_version > 0"
+                ).fetchone()
+                if remaining is not None and int(remaining["count"]) == 0:
+                    connection.execute(
+                        """
+                        UPDATE catalog_state
+                        SET embedding_model = NULL, embedding_dimension = NULL
+                        WHERE id = 1
+                        """
+                    )
                 _bump(connection)
         return deleted
+
+    def replace_graph(self, document_id: str, version: int, edges: list[GraphEdge]) -> None:
+        """Replace every edge for a document with the edges of one version."""
+        with self._connect() as connection:
+            connection.execute("DELETE FROM graph_edges WHERE document_id = ?", (document_id,))
+            connection.executemany(
+                """
+                INSERT INTO graph_edges (
+                    document_id, version, source, source_key, relation, target, target_key, chunk_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        document_id,
+                        version,
+                        edge.source,
+                        edge.source.casefold(),
+                        edge.relation,
+                        edge.target,
+                        edge.target.casefold(),
+                        edge.chunk_id,
+                    )
+                    for edge in edges
+                ],
+            )
+
+    def neighbors(self, names: list[str], document_ids: set[str] | None) -> list[str]:
+        """Return path entities one hop from ``names`` in the visible documents."""
+        keys = sorted({name.casefold() for name in names if name.strip()})
+        if not keys or (document_ids is not None and not document_ids):
+            return []
+        marks = ",".join("?" for _ in keys)
+        sql = f"""
+            SELECT source, target FROM graph_edges
+            WHERE source_key IN ({marks}) OR target_key IN ({marks})
+        """
+        params: list[str] = [*keys, *keys]
+        if document_ids is not None:
+            ids = sorted(document_ids)
+            id_marks = ",".join("?" for _ in ids)
+            sql += f" AND document_id IN ({id_marks})"
+            params.extend(ids)
+        with self._connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        skip = set(keys)
+        found: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            for value in (str(row["source"]), str(row["target"])):
+                key = value.casefold()
+                if key in skip or key in seen or not is_path(value):
+                    continue
+                seen.add(key)
+                found.append(value)
+        return found
 
     def get_embedding(self, cache_key: str) -> list[float] | None:
         with self._connect() as connection:
@@ -671,6 +826,14 @@ def _insert_version(
     )
 
 
+def _ensure_catalog_columns(connection: sqlite3.Connection) -> None:
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(catalog_state)")}
+    if "embedding_model" not in columns:
+        connection.execute("ALTER TABLE catalog_state ADD COLUMN embedding_model TEXT")
+    if "embedding_dimension" not in columns:
+        connection.execute("ALTER TABLE catalog_state ADD COLUMN embedding_dimension INTEGER")
+
+
 def _ensure_schema(connection: sqlite3.Connection) -> None:
     existing = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'documents'"
@@ -680,6 +843,7 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         connection.execute(
             "INSERT OR IGNORE INTO catalog_state (id, generation) VALUES (1, 1)"
         )
+        _ensure_catalog_columns(connection)
         return
     columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
     sql = existing["sql"] or ""
@@ -689,6 +853,7 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         _add_document_columns(connection, columns)
     connection.executescript(_SCHEMA)
     connection.execute("INSERT OR IGNORE INTO catalog_state (id, generation) VALUES (1, 1)")
+    _ensure_catalog_columns(connection)
     connection.execute(
         """
         UPDATE documents

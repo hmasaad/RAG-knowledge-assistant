@@ -71,14 +71,28 @@ class VectorStore:
         port: int = 8000,
     ) -> None:
         self._lock = threading.RLock()
+        self._collection_name = collection_name
         client_settings = chromadb.Settings(anonymized_telemetry=False)
         if host:
             self._client = chromadb.HttpClient(host=host, port=port, settings=client_settings)
         else:
             path.mkdir(parents=True, exist_ok=True)
             self._client = chromadb.PersistentClient(path=str(path), settings=client_settings)
-        self._collection = self._client.get_or_create_collection(
-            name=collection_name,
+        self._collection = self._open_collection()
+
+    def recreate(self) -> None:
+        """Drop the collection so the next vectors can use a new width.
+
+        Chroma keeps the dimension of the first embedding after every row is
+        deleted. A model migration has to create a fresh collection.
+        """
+        with self._lock:
+            self._client.delete_collection(self._collection_name)
+            self._collection = self._open_collection()
+
+    def _open_collection(self):
+        return self._client.get_or_create_collection(
+            name=self._collection_name,
             metadata={"hnsw:space": "cosine"},
             embedding_function=_ExternalEmbeddings(),
         )
@@ -196,6 +210,7 @@ class VectorStore:
                     "end_char": int(meta.get("end_char", 0)),
                     "page": _optional_page(meta.get("page")),
                     "heading": _optional_text(meta.get("heading")),
+                    "context": str(meta.get("context") or ""),
                 }
             )
         rows.sort(key=lambda row: row["index"])
@@ -249,7 +264,7 @@ def _document_filter(document_ids: set[str] | None) -> dict[str, Any] | None:
 
 
 def _metadata(chunk: Chunk) -> dict[str, Any]:
-    return {
+    payload = {
         "document_id": chunk.document_id,
         "filename": chunk.filename,
         "content_type": chunk.content_type,
@@ -260,6 +275,15 @@ def _metadata(chunk: Chunk) -> dict[str, Any]:
         "heading": chunk.heading or "",
         "version": chunk.version,
     }
+    if chunk.parent_id:
+        payload["parent_id"] = chunk.parent_id
+        payload["parent_text"] = chunk.parent_text
+        payload["parent_index"] = chunk.parent_index
+        payload["parent_start"] = chunk.parent_start
+        payload["parent_end"] = chunk.parent_end
+    if chunk.context:
+        payload["context"] = chunk.context
+    return payload
 
 
 def chunk_version(metadata: dict[str, Any] | None) -> int:
@@ -287,7 +311,11 @@ def _optional_text(value: Any) -> str | None:
 
 
 def _distance_to_score(distance: float | None) -> float:
-    """Convert a cosine distance into a higher-is-better similarity."""
+    """Convert a cosine distance into a higher-is-better similarity.
+
+    Chroma's cosine distance matches ``cosine_distance`` for normalized
+    vectors, so this score matches ``cosine_similarity`` when it is positive.
+    """
     if distance is None:
         return 0.0
     score = 1.0 - float(distance)

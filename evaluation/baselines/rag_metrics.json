@@ -1,0 +1,8 @@
+{
+  "recall_at_k": 1.0,
+  "mrr": 1.0,
+  "ndcg_at_k": 1.0,
+  "faithfulness": 1.0,
+  "answer_relevance": 1.0,
+  "citation_correctness": 1.0
+}

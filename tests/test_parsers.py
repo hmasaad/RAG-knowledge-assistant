@@ -9,11 +9,15 @@ from app.security.uploads import validate_upload
 def test_markdown_and_text_types() -> None:
     markdown = parse_document("Guide.MD", b"\xef\xbb\xbf# Title\n")
     plain = parse_document("notes.txt", "plain words".encode())
+    source = parse_document("client.py", b"def retry_request():\n    return 1\n")
+    architecture = parse_document("platform.adoc", b"= Platform\n")
 
     assert markdown.content_type == "text/markdown"
     assert markdown.pages[0].text == "# Title\n"
     assert plain.content_type == "text/plain"
     assert plain.pages[0].number is None
+    assert source.content_type == "text/x-python"
+    assert architecture.content_type == "text/asciidoc"
 
 
 def test_pdf_preserves_page_numbers() -> None:

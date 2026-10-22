@@ -31,6 +31,11 @@ class CachingEmbedder:
     def model(self) -> str:
         return getattr(self._inner, "model", "unknown")
 
+    @property
+    def dimension(self) -> int | None:
+        value = getattr(self._inner, "dimension", None)
+        return None if value is None else int(value)
+
     def embed_query(self, text: str) -> list[float]:
         vectors = self.embed_documents([text])
         return vectors[0]

@@ -1,0 +1,6 @@
+{
+  "injection_block_rate": 1.0,
+  "access_filter_rate": 1.0,
+  "leakage_block_rate": 1.0,
+  "poison_resistance_rate": 1.0
+}

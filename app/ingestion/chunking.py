@@ -1,12 +1,42 @@
-"""Split cleaned text into overlapping slices that prefer natural boundaries."""
+"""Split cleaned text into overlapping slices.
+
+``structure`` keeps markdown sections, then splits each section on natural
+boundaries. ``recursive`` uses those boundaries without headings. ``fixed``
+cuts every window at ``chunk_size``. ``semantic`` groups neighboring sentences
+while their embeddings stay similar.
+"""
 
 import re
 from dataclasses import dataclass
 
 from app.ingestion.models import ChunkDraft
+from app.ingestion.similarity import cosine_similarity
 
 _HEADING = re.compile(r"^(#{1,6})[ \t]+(\S.*?)\s*$")
+_ADOC_HEADING = re.compile(r"^(=+)[ \t]+(\S.*?)\s*$")
 _SEPARATORS = ("\n\n", "\n", ". ", " ")
+STRATEGIES = ("fixed", "recursive", "semantic", "structure")
+_CODE_PATTERNS = {
+    "text/x-python": re.compile(r"^(?:async\s+def|def|class)\s+([A-Za-z_]\w*)"),
+    "text/x-ruby": re.compile(r"^(?:def|class|module)\s+([A-Za-z_]\w*)"),
+    "text/javascript": re.compile(
+        r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)"
+    ),
+    "text/typescript": re.compile(
+        r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|interface|type)\s+([A-Za-z_$][\w$]*)"
+    ),
+    "text/x-go": re.compile(r"^func(?:\s+\([^)\n]*\))?\s+([A-Za-z_]\w*)"),
+    "text/x-rust": re.compile(
+        r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|struct|enum|trait)\s+([A-Za-z_]\w*)"
+    ),
+    "text/x-java": re.compile(
+        r"^(?:(?:public|private|protected|static|final|abstract)\s+)*(?:class|interface|enum)\s+([A-Za-z_]\w*)"
+    ),
+    "text/x-sql": re.compile(
+        r"(?i)^create\s+(?:or\s+replace\s+)?(?:table|view|function|index)\s+([A-Za-z_][\w.]*)"
+    ),
+    "text/x-shell": re.compile(r"^([A-Za-z_][\w]*)\s*\(\s*\)"),
+}
 
 
 @dataclass(frozen=True)
@@ -29,11 +59,19 @@ def build_chunks(
     content_type: str,
     chunk_size: int,
     overlap: int,
+    strategy: str = "structure",
+    embedder: object | None = None,
+    semantic_similarity: float = 0.5,
 ) -> list[ChunkDraft]:
-    """Chunk cleaned text. Markdown is split on headings first.
+    """Chunk cleaned text.
 
-    Heading lines inside fenced code blocks stay in the surrounding section.
+    ``strategy`` is ``fixed``, ``recursive``, ``semantic``, or ``structure``.
+    Structure is the default: markdown and AsciiDoc are split on headings, and
+    source files are split on top-level symbols. Heading lines inside fenced
+    code blocks stay in the surrounding section.
     """
+    if strategy not in STRATEGIES:
+        raise ValueError(f"Unknown chunk strategy: {strategy}.")
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
     if overlap < 0 or overlap >= chunk_size:
@@ -41,8 +79,27 @@ def build_chunks(
     if not text.strip():
         return []
 
+    if strategy == "fixed":
+        return _drafts(_fixed_windows(text, chunk_size=chunk_size, overlap=overlap))
+    if strategy == "recursive":
+        return _drafts(_chunk_text(text, chunk_size=chunk_size, overlap=overlap))
+    if strategy == "semantic":
+        if embedder is None:
+            raise ValueError("semantic chunking requires an embedder")
+        return _semantic_drafts(
+            text,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            embedder=embedder,
+            similarity_threshold=semantic_similarity,
+        )
+
     if content_type == "text/markdown":
         sections = _markdown_sections(text)
+    elif content_type == "text/asciidoc":
+        sections = _asciidoc_sections(text)
+    elif content_type in _CODE_PATTERNS:
+        sections = _code_sections(text, content_type)
     else:
         sections = [_Section(heading=None, start=0, end=len(text))]
 
@@ -79,16 +136,66 @@ def _markdown_sections(text: str) -> list[_Section]:
 
     if not headings:
         return [_Section(heading=None, start=0, end=len(text))]
+    return _sections_from_marks(text, headings)
 
+
+def _asciidoc_sections(text: str) -> list[_Section]:
+    """Split an architecture document on AsciiDoc headings."""
+    headings: list[tuple[int, str]] = []
+    in_block = False
+    for start, end, line in _line_spans(text):
+        content = _line_content(line)
+        stripped = content.strip()
+        if _is_adoc_delimiter(stripped):
+            in_block = not in_block
+            continue
+        if in_block:
+            continue
+        match = _ADOC_HEADING.match(content)
+        if match:
+            headings.append((start, match.group(2).strip()))
+    if not headings:
+        return [_Section(heading=None, start=0, end=len(text))]
+    return _sections_from_marks(text, headings)
+
+
+def _code_sections(text: str, content_type: str) -> list[_Section]:
+    """Split source on top-level symbols. Nested definitions stay with the parent."""
+    pattern = _CODE_PATTERNS[content_type]
+    marks: list[tuple[int, str]] = []
+    for start, end, line in _line_spans(text):
+        content = _line_content(line)
+        if content[:1] in {" ", "\t"}:
+            continue
+        match = pattern.match(content)
+        if match:
+            marks.append((start, match.group(1)))
+    if not marks:
+        return [_Section(heading=None, start=0, end=len(text))]
+    return _sections_from_marks(text, marks)
+
+
+def _sections_from_marks(text: str, marks: list[tuple[int, str]]) -> list[_Section]:
     sections: list[_Section] = []
-    first_heading = headings[0][0]
-    if first_heading > 0 and text[:first_heading].strip():
-        sections.append(_Section(heading=None, start=0, end=first_heading))
-    for index, (start, heading) in enumerate(headings):
-        end = headings[index + 1][0] if index + 1 < len(headings) else len(text)
+    first = marks[0][0]
+    if first > 0 and text[:first].strip():
+        sections.append(_Section(heading=None, start=0, end=first))
+    for index, (start, heading) in enumerate(marks):
+        end = marks[index + 1][0] if index + 1 < len(marks) else len(text)
         if text[start:end].strip():
             sections.append(_Section(heading=heading, start=start, end=end))
     return sections
+
+
+def _line_content(line: str) -> str:
+    content = line[:-1] if line.endswith("\n") else line
+    if content.endswith("\r"):
+        content = content[:-1]
+    return content
+
+
+def _is_adoc_delimiter(stripped: str) -> bool:
+    return len(stripped) >= 4 and stripped == stripped[0] * len(stripped) and stripped[0] in "-.*"
 
 
 def _line_spans(text: str) -> list[tuple[int, int, str]]:
@@ -98,6 +205,114 @@ def _line_spans(text: str) -> list[tuple[int, int, str]]:
         spans.append((start, start + len(line), line))
         start += len(line)
     return spans
+
+
+def _drafts(spans: list[_Span], *, heading: str | None = None, origin: int = 0) -> list[ChunkDraft]:
+    return [
+        ChunkDraft(
+            text=span.text,
+            start=origin + span.start,
+            end=origin + span.end,
+            heading=heading,
+        )
+        for span in spans
+        if span.text.strip()
+    ]
+
+
+def _fixed_windows(text: str, *, chunk_size: int, overlap: int) -> list[_Span]:
+    """Cut the text every ``chunk_size`` characters, with no boundary preference."""
+    spans: list[_Span] = []
+    start = 0
+    length = len(text)
+    while start < length:
+        end = min(start + chunk_size, length)
+        spans.append(_Span(text=text[start:end], start=start, end=end))
+        if end >= length:
+            break
+        next_start = end - overlap
+        if next_start <= start:
+            next_start = end
+        start = next_start
+    return spans
+
+
+def _semantic_drafts(
+    text: str,
+    *,
+    chunk_size: int,
+    overlap: int,
+    embedder: object,
+    similarity_threshold: float,
+) -> list[ChunkDraft]:
+    """Group adjacent sentences while their embeddings stay close.
+
+    A sentence longer than ``chunk_size`` falls back to the recursive splitter.
+    """
+    sentences = _sentence_spans(text)
+    if not sentences:
+        return []
+    vectors = embedder.embed_documents([sentence.text for sentence in sentences])
+    if len(vectors) != len(sentences):
+        raise ValueError("Embedding provider returned an unexpected number of vectors.")
+    groups: list[list[int]] = [[0]]
+    for index in range(1, len(sentences)):
+        similarity = cosine_similarity(vectors[index - 1], vectors[index])
+        start = sentences[groups[-1][0]].start
+        end = sentences[index].end
+        if similarity >= similarity_threshold and end - start <= chunk_size:
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+
+    drafts: list[ChunkDraft] = []
+    for group in groups:
+        start = sentences[group[0]].start
+        end = sentences[group[-1]].end
+        piece = text[start:end]
+        if not piece.strip():
+            continue
+        if len(piece) <= chunk_size:
+            drafts.append(ChunkDraft(text=piece, start=start, end=end, heading=None))
+            continue
+        for span in _chunk_text(piece, chunk_size=chunk_size, overlap=overlap):
+            drafts.append(
+                ChunkDraft(
+                    text=span.text,
+                    start=start + span.start,
+                    end=start + span.end,
+                    heading=None,
+                )
+            )
+    return drafts
+
+
+def _sentence_spans(text: str) -> list[_Span]:
+    """Split on sentence punctuation and newlines, keeping original offsets."""
+    spans: list[_Span] = []
+    start = 0
+    index = 0
+    length = len(text)
+    while index < length:
+        boundary = text[index] == "\n" or (
+            text[index] in ".!?" and (index + 1 == length or text[index + 1].isspace())
+        )
+        if boundary:
+            _append_sentence(spans, text, start, index + 1)
+            start = index + 1
+        index += 1
+    if start < length:
+        _append_sentence(spans, text, start, length)
+    return spans
+
+
+def _append_sentence(spans: list[_Span], text: str, start: int, end: int) -> None:
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    if start < end:
+        spans.append(_Span(text=text[start:end], start=start, end=end))
 
 
 def _chunk_text(text: str, *, chunk_size: int, overlap: int) -> list[_Span]:

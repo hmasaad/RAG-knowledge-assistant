@@ -58,6 +58,7 @@ def retrieve(
         conflict=result.conflict,
         inspection=result.inspection,
         passages=[passage_response(passage) for passage in result.passages],
+        queries=list(result.queries),
     )
 
 
@@ -72,6 +73,7 @@ def passage_response(passage: RankedPassage) -> PassageResponse:
         answers_question=passage.answers_question,
         matched_terms=list(passage.matched_terms),
         instruction_detected=passage.instruction_detected,
+        rerank_score=passage.rerank_score,
         source=SourceResponse(
             chunk_id=source.chunk_id,
             document_id=source.document_id,

@@ -149,6 +149,7 @@ class PassageResponse(BaseModel):
     answers_question: bool
     matched_terms: list[str]
     instruction_detected: bool = False
+    rerank_score: float = 0.0
     source: SourceResponse
 
 
@@ -158,6 +159,7 @@ class RetrieveResponse(BaseModel):
     conflict: bool = False
     inspection: str
     passages: list[PassageResponse]
+    queries: list[str] = []
 
 
 class AnswerRequest(BaseModel):
@@ -191,3 +193,5 @@ class AnswerResponse(BaseModel):
     conflict: bool = False
     citations: list[CitationResponse]
     passages: list[PassageResponse]
+    action: str = "answer"
+    trace_id: str = ""

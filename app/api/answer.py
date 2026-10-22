@@ -36,4 +36,6 @@ def answer(
             for citation in result.citations
         ],
         passages=[passage_response(passage) for passage in result.passages],
+        action=result.action,
+        trace_id=result.trace_id,
     )

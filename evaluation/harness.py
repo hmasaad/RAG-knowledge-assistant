@@ -329,7 +329,7 @@ def _mean(values) -> float:
 
 
 class _FailingEmbedder:
-    model = "failing"
+    model = "local-hash-bow"
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         raise RuntimeError("vector store unavailable")

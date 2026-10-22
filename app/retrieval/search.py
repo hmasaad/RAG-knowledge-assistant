@@ -5,14 +5,20 @@ from dataclasses import dataclass
 
 from app.ingestion.embeddings import Embedder
 from app.ingestion.errors import KnowledgeError
+from app.ingestion.similarity import embedding_matches, mismatch_message
+from app.ingestion.graph import path_entities
 from app.ingestion.metadata_store import MetadataStore
 from app.ingestion.vector_store import VectorStore, chunk_version
 from app.observability.logging import log_event
 from app.observability.metrics import Metrics
 from app.retrieval.conflicts import documents_conflict
-from app.retrieval.hybrid import RankedChunk, rank_chunks
+from app.retrieval.hybrid import RankedChunk, merge_query_rankings, rank_chunks
 from app.retrieval.inspect import covers_question
+from app.retrieval.parents import expand_parents
+from app.retrieval.queries import plan_searches
+from app.retrieval.rerank import Reranker, apply_rerank
 from app.retrieval.text import content_tokens
+from app.security.leakage import sensitive_tokens
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,7 @@ class RankedPassage:
     source: SourceMetadata
     safe_text: str = ""
     instruction_detected: bool = False
+    rerank_score: float = 0.0
 
     def model_text(self) -> str:
         """Text the model may see. Instruction lines are already removed."""
@@ -55,6 +62,7 @@ class RetrievalResult:
     inspection: str
     passages: list[RankedPassage]
     conflict: bool = False
+    queries: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -85,6 +93,11 @@ class SearchService:
         coverage_weight: float = 0.35,
         min_coverage: float = 0.5,
         metrics: Metrics | None = None,
+        reranker: Reranker | None = None,
+        rewrite: bool = False,
+        decompose: bool = False,
+        multi_query: bool = False,
+        knowledge_graph: bool = False,
     ) -> None:
         self._vectors = vectors
         self._embedder = embedder
@@ -95,6 +108,11 @@ class SearchService:
         self._coverage_weight = coverage_weight
         self._min_coverage = min_coverage
         self._metrics = metrics
+        self._reranker = reranker
+        self._rewrite = rewrite
+        self._decompose = decompose
+        self._multi_query = multi_query
+        self._knowledge_graph = knowledge_graph
 
     def search(self, query: str, top_k: int = 5, *, user_id: str | None = None) -> list[SearchHit]:
         """Return ranked passages in the original search shape."""
@@ -108,9 +126,11 @@ class SearchService:
         *,
         user_id: str | None = None,
     ) -> RetrievalResult:
-        """Embed a question, fuse vector and lexical rankings, and inspect coverage.
+        """Embed one or more queries, fuse vector and BM25 rankings, then rerank.
 
-        Only documents the caller can read are searched.
+        Only documents the caller can read are searched. Query rewriting,
+        decomposition, multi-query fusion, and graph neighbors run when those
+        options are enabled. A child hit expands to its parent text.
         """
         cleaned = _validate(query, top_k)
         caller = user_id or self._default_user_id
@@ -121,32 +141,54 @@ class SearchService:
                 sufficient_evidence=False,
                 inspection="No documents are visible to this caller.",
                 passages=[],
+                queries=(cleaned,),
             )
         document_ids = None if versions is None else set(versions)
+        self._require_current_embeddings()
+        searches = self._searches(cleaned, document_ids)
+        focus = searches[0]
 
         started = time.perf_counter()
         try:
-            embedding = self._embedder.embed_query(cleaned)
             candidate_k = max(self._candidate_k, top_k)
-            vector_hits = _keep_versions(
-                self._vectors.query(
-                    embedding,
-                    candidate_k,
-                    document_ids=document_ids,
-                ),
-                versions,
-            )
-            ranked = rank_chunks(
-                query_tokens=content_tokens(cleaned),
-                vector_hits=vector_hits,
-                chunks=_keep_versions(
+            chunks = expand_parents(
+                _keep_versions(
                     self._vectors.list_chunks(document_ids=document_ids),
                     versions,
-                ),
-                candidate_k=candidate_k,
-                rrf_k=self._rrf_k,
-                coverage_weight=self._coverage_weight,
+                )
             )
+            groups: list[list[RankedChunk]] = []
+            vector_hits: list = []
+            for search_query in searches:
+                hits = expand_parents(
+                    _keep_versions(
+                        self._vectors.query(
+                            self._embedder.embed_query(search_query),
+                            candidate_k,
+                            document_ids=document_ids,
+                        ),
+                        versions,
+                    )
+                )
+                if not vector_hits:
+                    vector_hits = hits
+                groups.append(
+                    rank_chunks(
+                        query_tokens=content_tokens(search_query),
+                        vector_hits=hits,
+                        chunks=chunks,
+                        candidate_k=candidate_k,
+                        rrf_k=self._rrf_k,
+                        coverage_weight=self._coverage_weight,
+                    )
+                )
+            ranked = merge_query_rankings(
+                groups,
+                query_tokens=content_tokens(focus),
+                rrf_k=self._rrf_k,
+            )
+            if self._reranker is not None:
+                ranked = apply_rerank(focus, ranked, self._reranker)
         except KnowledgeError:
             raise
         except Exception as exc:
@@ -177,6 +219,7 @@ class SearchService:
             inspection=inspection,
             passages=passages,
             conflict=conflict,
+            queries=searches,
         )
         top_score = passages[0].score if passages else 0.0
         log_event(
@@ -191,6 +234,8 @@ class SearchService:
             top_score=round(top_score, 6),
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
             embedding_model=getattr(self._embedder, "model", "unknown"),
+            rerank_model=None if self._reranker is None else self._reranker.model,
+            query_count=len(searches),
         )
         if self._metrics is not None:
             self._metrics.observe(
@@ -203,6 +248,44 @@ class SearchService:
         if self._metadata is None:
             return None
         return self._metadata.readable_versions(user_id)
+
+    def _searches(self, question: str, document_ids: set[str] | None) -> tuple[str, ...]:
+        extra: tuple[str, ...] = ()
+        if self._knowledge_graph and self._metadata is not None:
+            names = path_entities(question)
+            if names:
+                extra = tuple(self._metadata.neighbors(names, document_ids)[:4])
+        return plan_searches(
+            question,
+            rewrite=self._rewrite,
+            decompose=self._decompose,
+            multi_query=self._multi_query,
+            extra=extra,
+        )
+
+    def hidden_sensitive_tokens(self, user_id: str) -> set[str]:
+        """Secret values that live only in documents this caller cannot read."""
+        if self._metadata is None:
+            return set()
+        visible = self._metadata.readable_versions(user_id)
+        hidden: set[str] = set()
+        for record in self._metadata.list_documents():
+            if record.indexed_version < 1 or record.id in visible:
+                continue
+            for row in self._vectors.chunks_for_document(record.id, version=record.indexed_version):
+                hidden.update(sensitive_tokens(str(row["text"])))
+        return hidden
+
+    def _require_current_embeddings(self) -> None:
+        if self._metadata is None:
+            return
+        identity = self._metadata.embedding_identity()
+        if embedding_matches(self._embedder, identity) or identity is None:
+            return
+        raise KnowledgeError(
+            mismatch_message(identity, self._embedder, action="searching"),
+            status_code=409,
+        )
 
 
 def _validate(query: str, top_k: int) -> str:
@@ -230,6 +313,7 @@ def _passage(rank: int, chunk: RankedChunk, *, min_coverage: float) -> RankedPas
         source=_source(chunk.chunk_id, chunk.metadata),
         safe_text=chunk.safe_text,
         instruction_detected=chunk.instruction_detected,
+        rerank_score=_round(chunk.rerank_score),
     )
 
 

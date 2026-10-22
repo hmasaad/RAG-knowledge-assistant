@@ -4,10 +4,13 @@ import time
 
 from app.ingestion.chunking import build_chunks
 from app.ingestion.cleaning import clean_text
+from app.ingestion.context import embedding_text, situate
 from app.ingestion.embeddings import Embedder
 from app.ingestion.errors import IngestionError
+from app.ingestion.graph import GraphEdge, extract_edges
 from app.ingestion.metadata_store import MetadataStore
 from app.ingestion.models import Chunk, DocumentRecord, ParsedPage
+from app.ingestion.parents import split_children
 from app.ingestion.parsers import parse_document
 from app.ingestion.vector_store import VectorStore
 from app.observability.logging import log_event
@@ -24,6 +27,12 @@ def index_stored_version(
     version: int,
     chunk_size: int,
     chunk_overlap: int,
+    chunk_strategy: str = "structure",
+    semantic_similarity: float = 0.35,
+    parent_retrieval: bool = False,
+    child_chunk_size: int = 240,
+    contextual_retrieval: bool = False,
+    knowledge_graph: bool = False,
 ) -> DocumentRecord:
     """Embed the stored bytes for one version and publish that version."""
     current = metadata.get(document_id)
@@ -46,9 +55,16 @@ def index_stored_version(
             data=data,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            chunk_strategy=chunk_strategy,
+            semantic_similarity=semantic_similarity,
+            embedder=embedder,
+            parent_retrieval=parent_retrieval,
+            child_chunk_size=child_chunk_size,
+            contextual_retrieval=contextual_retrieval,
         )
-        embeddings = embedder.embed_documents([chunk.text for chunk in chunks])
+        embeddings = embedder.embed_documents([embedding_text(chunk.text, chunk.context) for chunk in chunks])
         _require_embeddings(chunks, embeddings)
+        metadata.assert_embedding_compatible(getattr(embedder, "model", "unknown"), len(embeddings[0]))
         vectors.delete_version(document_id, version)
         vectors.add(chunks, embeddings)
     except Exception as exc:
@@ -68,6 +84,12 @@ def index_stored_version(
         raise IngestionError(message, status_code=500) from exc
 
     record = metadata.complete_version(document_id, version, len(chunks))
+    metadata.record_embedding(getattr(embedder, "model", "unknown"), len(embeddings[0]))
+    metadata.replace_graph(
+        document_id,
+        version,
+        _graph_edges(chunks) if knowledge_graph else [],
+    )
     vectors.delete_other_versions(document_id, version)
     log_event(
         "rag.ingestion",
@@ -78,6 +100,7 @@ def index_stored_version(
         content_type=record.content_type,
         chunk_count=record.chunk_count,
         byte_size=record.byte_size,
+        chunk_strategy=chunk_strategy,
         duration_ms=round((time.perf_counter() - started) * 1000, 2),
         embedding_model=getattr(embedder, "model", "unknown"),
     )
@@ -92,6 +115,12 @@ def chunks_for_bytes(
     data: bytes,
     chunk_size: int,
     chunk_overlap: int,
+    chunk_strategy: str = "structure",
+    semantic_similarity: float = 0.35,
+    embedder: Embedder | None = None,
+    parent_retrieval: bool = False,
+    child_chunk_size: int = 240,
+    contextual_retrieval: bool = False,
 ) -> list[Chunk]:
     parsed = parse_document(filename, data)
     chunks = _chunks_for_pages(
@@ -102,6 +131,12 @@ def chunks_for_bytes(
         pages=parsed.pages,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        chunk_strategy=chunk_strategy,
+        semantic_similarity=semantic_similarity,
+        embedder=embedder,
+        parent_retrieval=parent_retrieval,
+        child_chunk_size=child_chunk_size,
+        contextual_retrieval=contextual_retrieval,
     )
     if not chunks:
         raise IngestionError(
@@ -120,6 +155,12 @@ def _chunks_for_pages(
     pages: list[ParsedPage],
     chunk_size: int,
     chunk_overlap: int,
+    chunk_strategy: str,
+    semantic_similarity: float,
+    embedder: Embedder | None,
+    parent_retrieval: bool,
+    child_chunk_size: int,
+    contextual_retrieval: bool,
 ) -> list[Chunk]:
     chunks: list[Chunk] = []
     for page in pages:
@@ -129,6 +170,9 @@ def _chunks_for_pages(
             content_type=content_type,
             chunk_size=chunk_size,
             overlap=chunk_overlap,
+            strategy=chunk_strategy,
+            embedder=embedder,
+            semantic_similarity=semantic_similarity,
         )
         for draft in drafts:
             index = len(chunks)
@@ -147,7 +191,47 @@ def _chunks_for_pages(
                     version=version,
                 )
             )
+    if parent_retrieval:
+        chunks = split_children(chunks, child_chunk_size=child_chunk_size, overlap=chunk_overlap)
+    if contextual_retrieval:
+        chunks = [_with_context(chunk) for chunk in chunks]
     return chunks
+
+
+def _with_context(chunk: Chunk) -> Chunk:
+    return Chunk(
+        id=chunk.id,
+        document_id=chunk.document_id,
+        filename=chunk.filename,
+        content_type=chunk.content_type,
+        text=chunk.text,
+        index=chunk.index,
+        start_char=chunk.start_char,
+        end_char=chunk.end_char,
+        page=chunk.page,
+        heading=chunk.heading,
+        version=chunk.version,
+        parent_id=chunk.parent_id,
+        parent_text=chunk.parent_text,
+        parent_index=chunk.parent_index,
+        parent_start=chunk.parent_start,
+        parent_end=chunk.parent_end,
+        context=situate(chunk.filename, chunk.heading),
+    )
+
+
+def _graph_edges(chunks: list[Chunk]) -> list[GraphEdge]:
+    edges: list[GraphEdge] = []
+    seen_parents: set[str] = set()
+    for chunk in chunks:
+        if chunk.parent_text:
+            if chunk.parent_id in seen_parents:
+                continue
+            seen_parents.add(chunk.parent_id)
+            edges.extend(extract_edges(chunk.parent_text, chunk.parent_id))
+        else:
+            edges.extend(extract_edges(chunk.text, chunk.id))
+    return edges
 
 
 def _require_embeddings(chunks: list[Chunk], embeddings: list[list[float]]) -> None:

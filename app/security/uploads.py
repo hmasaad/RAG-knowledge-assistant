@@ -5,7 +5,43 @@ from pathlib import Path
 
 from app.ingestion.errors import IngestionError
 
-ALLOWED_EXTENSIONS = {".pdf", ".md", ".markdown", ".txt", ".text"}
+TEXT_TYPES = {
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".txt": "text/plain",
+    ".text": "text/plain",
+}
+SOURCE_TYPES = {
+    ".py": "text/x-python",
+    ".js": "text/javascript",
+    ".jsx": "text/javascript",
+    ".ts": "text/typescript",
+    ".tsx": "text/typescript",
+    ".go": "text/x-go",
+    ".rs": "text/x-rust",
+    ".java": "text/x-java",
+    ".rb": "text/x-ruby",
+    ".sql": "text/x-sql",
+    ".sh": "text/x-shell",
+}
+ARCHITECTURE_TYPES = {
+    ".adoc": "text/asciidoc",
+    ".asciidoc": "text/asciidoc",
+}
+ALLOWED_EXTENSIONS = set(TEXT_TYPES) | set(SOURCE_TYPES) | set(ARCHITECTURE_TYPES) | {".pdf"}
+UNSUPPORTED_TYPE = (
+    "Unsupported file type. Upload a PDF, Markdown, text, AsciiDoc, or source file."
+)
+
+
+def content_type_for(extension: str) -> str | None:
+    """Media type for a lowercase extension, including the leading dot."""
+    if extension == ".pdf":
+        return "application/pdf"
+    for table in (TEXT_TYPES, SOURCE_TYPES, ARCHITECTURE_TYPES):
+        if extension in table:
+            return table[extension]
+    return None
 
 
 @dataclass(frozen=True)
@@ -37,7 +73,7 @@ def validate_upload(
     extension = Path(safe_name).suffix.lower()
     if extension not in ALLOWED_EXTENSIONS:
         raise IngestionError(
-            "Unsupported file type. Upload a PDF, Markdown, or text file.",
+            UNSUPPORTED_TYPE,
             status_code=415,
         )
     if not data:

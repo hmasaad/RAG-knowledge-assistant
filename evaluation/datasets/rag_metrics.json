@@ -1,0 +1,34 @@
+[
+  {
+    "id": "retry-file",
+    "question": "which file implements the retry logic",
+    "documents": ["api-errors.md", "database.md"],
+    "relevant": {"api-errors.md": 2},
+    "expect_answer": true,
+    "k": 3
+  },
+  {
+    "id": "timeouts",
+    "question": "where are connect and read timeouts configured",
+    "documents": ["api-errors.md", "database.md"],
+    "relevant": {"api-errors.md": 2},
+    "expect_answer": true,
+    "k": 3
+  },
+  {
+    "id": "irrelevant-wifi",
+    "question": "what is the office wifi password",
+    "documents": ["api-errors.md", "database.md"],
+    "relevant": {},
+    "expect_answer": false,
+    "k": 3
+  },
+  {
+    "id": "both-limits",
+    "question": "what is the retry limit",
+    "documents": ["retry-limit-three.md", "retry-limit-five.md"],
+    "relevant": {"retry-limit-three.md": 1, "retry-limit-five.md": 1},
+    "expect_answer": true,
+    "k": 3
+  }
+]

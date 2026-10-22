@@ -4,6 +4,8 @@ import hashlib
 import time
 import uuid
 
+from dataclasses import dataclass
+
 from app.ingestion.errors import IngestionError
 from app.ingestion.indexing import chunks_for_bytes, index_stored_version
 from app.ingestion.metadata_store import MetadataStore
@@ -14,6 +16,13 @@ from app.observability.metrics import Metrics
 from app.security.access import normalize_visibility
 from app.security.uploads import validate_upload
 from app.storage.blobs import BlobStore, MemoryBlobStore
+
+
+@dataclass(frozen=True)
+class RecoveryReport:
+    requeued_failed: int
+    requeued_missing: int
+    reindexed: int
 
 
 class IngestionService:
@@ -30,6 +39,12 @@ class IngestionService:
         indexing_mode: str = "inline",
         metrics: Metrics | None = None,
         job_timeout_seconds: float = 900,
+        chunk_strategy: str = "structure",
+        semantic_similarity: float = 0.35,
+        parent_retrieval: bool = False,
+        child_chunk_size: int = 240,
+        contextual_retrieval: bool = False,
+        knowledge_graph: bool = False,
     ) -> None:
         self._metadata = metadata
         self._vectors = vectors
@@ -41,6 +56,16 @@ class IngestionService:
         self._indexing_mode = indexing_mode
         self._metrics = metrics
         self._job_timeout_seconds = job_timeout_seconds
+        self._chunk_strategy = chunk_strategy
+        self._semantic_similarity = semantic_similarity
+        self._parent_retrieval = parent_retrieval
+        self._child_chunk_size = child_chunk_size
+        self._contextual_retrieval = contextual_retrieval
+        self._knowledge_graph = knowledge_graph
+
+    @property
+    def embedder(self) -> object:
+        return self._embedder
 
     def ingest(
         self,
@@ -139,6 +164,47 @@ class IngestionService:
         self._execute(job.document_id, job.version, raise_errors=False)
         return True
 
+    def recover(self) -> RecoveryReport:
+        """Requeue failed versions and indexed versions whose vectors are gone.
+
+        Inline mode rebuilds those versions before returning. Background mode
+        leaves them on the queue for the worker. A version that is still
+        indexed stays searchable until the replacement finishes.
+        """
+        failed = 0
+        missing = 0
+        for record in self._metadata.list_documents():
+            if record.status == "failed":
+                self._metadata.requeue(record.id, record.version)
+                failed += 1
+                continue
+            if record.indexed_version < 1 or record.version != record.indexed_version:
+                continue
+            chunks = self._vectors.chunks_for_document(
+                record.id,
+                version=record.indexed_version,
+            )
+            if chunks:
+                continue
+            self._metadata.requeue(record.id, record.indexed_version)
+            missing += 1
+        reindexed = 0
+        if self._indexing_mode == "inline":
+            while self.process_next_job():
+                reindexed += 1
+        log_event(
+            "rag.ingestion",
+            "index_recovered",
+            requeued_failed=failed,
+            requeued_missing=missing,
+            reindexed=reindexed,
+        )
+        return RecoveryReport(
+            requeued_failed=failed,
+            requeued_missing=missing,
+            reindexed=reindexed,
+        )
+
     def list_documents(self, *, user_id: str = "local") -> list[DocumentRecord]:
         return self._metadata.list_visible(user_id)
 
@@ -178,6 +244,8 @@ class IngestionService:
         checksums = {version.checksum for version in self._metadata.list_versions(document_id)}
         checksums.add(record.checksum)
         self._vectors.delete_document(record.id)
+        if self._vectors.count() == 0:
+            self._vectors.recreate()
         self._metadata.delete(record.id)
         for checksum in checksums:
             if not self._metadata.checksum_in_use(checksum):
@@ -202,6 +270,12 @@ class IngestionService:
             data=upload.data,
             chunk_size=self._chunk_size,
             chunk_overlap=self._chunk_overlap,
+            chunk_strategy=self._chunk_strategy,
+            semantic_similarity=self._semantic_similarity,
+            embedder=self._embedder,
+            parent_retrieval=self._parent_retrieval,
+            child_chunk_size=self._child_chunk_size,
+            contextual_retrieval=self._contextual_retrieval,
         )
         return upload, checksum, chunks[0].content_type
 
@@ -223,6 +297,12 @@ class IngestionService:
                 version=version,
                 chunk_size=self._chunk_size,
                 chunk_overlap=self._chunk_overlap,
+                chunk_strategy=self._chunk_strategy,
+                semantic_similarity=self._semantic_similarity,
+                parent_retrieval=self._parent_retrieval,
+                child_chunk_size=self._child_chunk_size,
+                contextual_retrieval=self._contextual_retrieval,
+                knowledge_graph=self._knowledge_graph,
             )
         except Exception as exc:
             message = exc.message if isinstance(exc, IngestionError) else "Failed to index the document."

@@ -13,6 +13,8 @@ from app.ingestion.service import IngestionService
 from app.ingestion.vector_store import VectorStore
 from app.observability.cache import LruCache
 from app.observability.metrics import Metrics
+from app.observability.tracing import TraceLog
+from app.retrieval.rerank import build_reranker
 from app.retrieval.search import RetrievalResult, SearchService
 from app.storage.blobs import BlobStore, LocalBlobStore
 
@@ -27,6 +29,7 @@ class Services:
     ingestion: IngestionService
     search: SearchService
     generation: GenerationService
+    traces: TraceLog
 
 
 class LazyEmbedder:
@@ -71,6 +74,7 @@ def build_services(
     metadata = MetadataStore(settings.sqlite_path)
     blobs = LocalBlobStore(settings.blob_path)
     metrics = Metrics()
+    traces = TraceLog()
     vectors = VectorStore(
         settings.chroma_path,
         settings.collection_name,
@@ -94,6 +98,12 @@ def build_services(
         indexing_mode=settings.indexing_mode,
         metrics=metrics,
         job_timeout_seconds=settings.job_timeout_seconds,
+        chunk_strategy=settings.chunk_strategy,
+        semantic_similarity=settings.semantic_similarity,
+        parent_retrieval=settings.parent_retrieval,
+        child_chunk_size=settings.child_chunk_size,
+        contextual_retrieval=settings.contextual_retrieval,
+        knowledge_graph=settings.knowledge_graph,
     )
     search = SearchService(
         vectors=vectors,
@@ -105,6 +115,17 @@ def build_services(
         coverage_weight=settings.rerank_coverage_weight,
         min_coverage=settings.evidence_min_coverage,
         metrics=metrics,
+        reranker=build_reranker(
+            provider=settings.rerank_provider,
+            model=settings.rerank_model,
+            api_url=settings.rerank_api_url,
+            api_key=settings.rerank_api_key,
+            timeout=settings.rerank_timeout_seconds,
+        ),
+        rewrite=settings.query_rewrite,
+        decompose=settings.query_decompose,
+        multi_query=settings.multi_query,
+        knowledge_graph=settings.knowledge_graph,
     )
     generation = GenerationService(
         retrieval=search,
@@ -112,7 +133,9 @@ def build_services(
         metadata=metadata,
         cache=LruCache(settings.answer_cache_size),
         metrics=metrics,
+        traces=traces,
         default_user_id=settings.default_user_id,
+        agent_enabled=settings.agent_enabled,
     )
     return Services(
         settings=settings,
@@ -123,6 +146,7 @@ def build_services(
         ingestion=ingestion,
         search=search,
         generation=generation,
+        traces=traces,
     )
 
 

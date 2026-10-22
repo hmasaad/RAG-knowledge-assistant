@@ -1,6 +1,6 @@
 # RAG Knowledge Assistant
 
-Upload PDF, Markdown, or text documents, search the indexed chunks, and ask questions that are answered only from those chunks.
+Upload PDF, Markdown, text, AsciiDoc architecture docs, or source files, search the indexed chunks, and ask questions that are answered only from those chunks.
 
 An answer includes citation markers such as `[1]` and the source file, heading, and page. If the retrieved passages do not cover the question, the API returns `I don't have enough evidence to answer.`
 
@@ -56,7 +56,7 @@ curl -X POST http://127.0.0.1:8000/api/answer \
   -d '{"question":"which file implements the retry logic","top_k":3}'
 ```
 
-`POST /api/retrieve` embeds the question, fuses vector search with BM25, reranks by how many question terms each passage contains, and returns ranked passages with source metadata. `sufficient_evidence` is false when none of those passages cover the question.
+`POST /api/retrieve` embeds the question, ranks passages with vector similarity and with BM25, and fuses those two rankings. It then reranks the candidates. The default reranker raises passages that contain more of the question's terms. Set `RERANK_PROVIDER=cross_encoder` to score each question and passage together, preferring terms that sit next to each other in the same order as the question. Set `RERANK_PROVIDER=api` to send those candidates to a Cohere-compatible rerank endpoint (`RERANK_API_URL` and `RERANK_API_KEY`). The response includes `vector_score`, `lexical_score`, and `rerank_score`. `queries` lists each search that was run. `sufficient_evidence` is false when none of those passages cover the question.
 
 `POST /api/answer` sends those passages to the language model. The model must cite them, and each citation has to be supported by the words in that passage. A reply with no valid citation, or a citation that does not match the passage, is replaced by the refusal sentence. When two visible documents state different numbers, `conflict` is true and the answer cites both sides.
 
@@ -66,7 +66,7 @@ Passages are untrusted data. Lines that try to change the assistant's rules, inc
 
 `POST /api/documents` returns `201` the first time a file's bytes are indexed for that owner and `200` with `already_indexed: true` when those same bytes were already stored for them. `PUT /api/documents/{id}` stores a new version. The previous indexed version stays searchable until the new one is indexed, and `GET /api/documents/{id}/versions` lists that history. `GET /api/documents/{id}/versions/{version}/file` returns the original bytes. `GET /api/documents/{id}` returns the chunks of the indexed version. `DELETE /api/documents/{id}` removes every version, its chunks, and the stored bytes.
 
-Chunk offsets are positions in the cleaned page text. PDF chunks include a 1-based `page`. Markdown chunks include the heading that introduced the section. Headings inside fenced code blocks are not treated as section titles.
+Chunk offsets are positions in the cleaned page text. PDF chunks include a 1-based `page`. Markdown and AsciiDoc chunks include the heading that introduced the section. Source chunks include the top-level function, class, or other symbol, and a nested definition stays inside that symbol. Headings inside fenced code blocks are not treated as section titles. Each chunk is embedded and stored in the vector collection with its filename, content type, and those source locations.
 
 ## Operate
 
@@ -79,7 +79,11 @@ python -m app.worker
 
 The API and the worker share `SQLITE_PATH` and `BLOB_PATH`. A local Chroma directory is safe for one process. Set `CHROMA_HOST` when more than one process reads or writes vectors. A job left in `running` longer than `JOB_TIMEOUT_SECONDS` is queued again.
 
-Repeated question and passage text is cached. Answers are cached until a document is indexed, deleted, or its visibility changes. `GET /health` reports queue depth and the catalog generation. `GET /ready` checks that metadata and vectors can be read. `GET /metrics` exposes counters and timings.
+Repeated question and passage text is cached. Answers are cached until a document is indexed, deleted, or its visibility changes. Unchanged sections of an updated document reuse the embedding cache, so a new version does not re-embed text that did not change. `GET /health` reports queue depth and the catalog generation. `GET /ready` checks that metadata and vectors can be read. `GET /metrics` exposes counters and timings.
+
+Each answer records a trace. The response includes `action` and `trace_id`. `action` is `clarify` when the question does not name a topic, `retry` when a shorter query was required, `answer` when the first search was enough, and `refuse` when the evidence is still missing. `GET /api/traces/{trace_id}` returns those steps.
+
+`POST /api/operations/recover` queues failed versions again and rebuilds any indexed version whose vectors are missing. Inline mode finishes that work in the request. Background mode leaves it on the worker queue. The previous indexed version stays searchable until the replacement finishes.
 
 One container is enough for a single host. It keeps SQLite, the original bytes, and Chroma on one volume, and indexes in a background thread:
 
@@ -88,6 +92,35 @@ docker compose up --build
 ```
 
 The local providers in that file are for an offline deploy. Set the OpenAI variables in the environment for production answers.
+
+## Chunking and embeddings
+
+`CHUNK_STRATEGY` selects how a document is split:
+
+- `fixed` cuts every `CHUNK_SIZE` characters
+- `recursive` prefers paragraph, line, and sentence breaks
+- `structure` does that inside markdown sections and keeps the heading
+- `semantic` groups neighboring sentences while their cosine similarity stays at or above `SEMANTIC_SIMILARITY`
+
+The collection records the embedding model and vector width used to index it. Search refuses to run when the active model differs, because those vectors are not comparable. `GET /api/embeddings` reports both identities. `POST /api/embeddings/migrate` rebuilds the vector collection and re-embeds every indexed version with the active model, including when the vector width changes. `POST /api/embeddings/evaluate` scores whether related passages outrank unrelated ones. The cosine retrieval score is `1 - cosine distance` for normalized vectors.
+
+## Query transformation
+
+These options are off by default, so a question is searched as it was asked.
+
+- `QUERY_REWRITE` removes politeness such as "can you tell me" before the search
+- `QUERY_DECOMPOSE` splits a question on "and" when both clauses still have two content words. "connect and read timeouts" stays one query
+- `MULTI_QUERY` searches the full question, each clause, and the question's keywords, then fuses those rankings
+
+`queries` in the retrieve response shows the searches that ran. Coverage is still judged against the rewritten question, or the original question when rewriting is off.
+
+## Advanced retrieval
+
+These options are also off by default. Turn one on and index again so the stored chunks match it.
+
+- `PARENT_RETRIEVAL` embeds slices of `CHILD_CHUNK_SIZE` and returns the parent section that contained the matching slice
+- `CONTEXTUAL_RETRIEVAL` embeds a prefix naming the file and heading with the chunk. The text stored for citation stays the original chunk
+- `KNOWLEDGE_GRAPH` records file paths that share a sentence, such as `alpha/retry.py calls beta/client.py`. A later question that names one path also searches the path it links to
 
 ## Tests
 
@@ -98,6 +131,10 @@ pytest
 `evaluation/datasets/phase1_retrieval.json` checks retrieval against the sample documents. `evaluation/datasets/phase3_answers.json` checks cited answers and the refusal when the collection does not contain the answer.
 
 `evaluation/datasets/phase4_quality.json` checks relevant questions, irrelevant questions, missing information, conflicting documents, incorrect citations, retrieval failures, and instructions hidden in a document. `pytest` compares the local pipeline with the floors in `evaluation/baselines/phase4_quality.json`.
+
+`evaluation/datasets/rag_metrics.json` scores Recall@K, MRR, nDCG, faithfulness, answer relevance, and citation correctness. Faithfulness is the share of a cited claim that appears in that passage. Answer relevance is the share of question words the passages can support that also appear in the answer. A refusal is faithful, and it is relevant when the question should be refused. Citation correctness requires the marker to name a relevant passage and clear the faithfulness bar.
+
+Indirect prompt injection is stripped before ranking and answering. Private documents are left out of search for other callers. An answer that repeats a canary, API key, password, or secret from a document the caller cannot read is replaced by the refusal. A chunk that repeats one word enough to crowd out ordinary prose is left out of ranking, so a poisoned document cannot win on keyword stuffing.
 
 ## Configuration
 
@@ -112,6 +149,8 @@ pytest
 | `SQLITE_PATH` | `data/metadata.db` | Document metadata |
 | `CHUNK_SIZE` | `800` | Maximum characters per chunk |
 | `CHUNK_OVERLAP` | `120` | Overlap between neighboring chunks |
+| `CHUNK_STRATEGY` | `structure` | `fixed`, `recursive`, `semantic`, or `structure` |
+| `SEMANTIC_SIMILARITY` | `0.35` | Minimum cosine similarity for joining sentences |
 | `MAX_UPLOAD_BYTES` | `10485760` | Upload limit |
 | `DEFAULT_USER_ID` | `local` | Caller used when `X-User-Id` is absent |
 | `BLOB_PATH` | `data/blobs` | Original bytes, stored by checksum |
@@ -123,7 +162,21 @@ pytest
 | `JOB_TIMEOUT_SECONDS` | `900` | Requeue a job left in `running` |
 | `EMBEDDING_CACHE_SIZE` | `4096` | Cached passage and query embeddings |
 | `ANSWER_CACHE_SIZE` | `256` | Cached answers for an unchanged catalog |
+| `AGENT_ENABLED` | `true` | Clarify, search, or retry before answering |
 | `RETRIEVAL_CANDIDATES` | `20` | Vector and lexical candidates before fusion |
+| `RRF_K` | `60` | Reciprocal-rank fusion constant |
+| `RERANK_COVERAGE_WEIGHT` | `0.35` | Weight of term coverage in the default score |
+| `RERANK_PROVIDER` | `coverage` | `coverage`, `cross_encoder`, or `api` |
+| `RERANK_MODEL` | empty | Cross-encoder name, or the API model (`rerank-v3.5` when empty) |
+| `RERANK_API_URL` | empty | Cohere-compatible rerank endpoint |
+| `RERANK_API_KEY` | empty | Bearer token for that endpoint |
+| `QUERY_REWRITE` | `false` | Strip politeness before searching |
+| `QUERY_DECOMPOSE` | `false` | Split a question into clauses |
+| `MULTI_QUERY` | `false` | Search each clause and fuse the rankings |
+| `PARENT_RETRIEVAL` | `false` | Search child slices and return the parent |
+| `CHILD_CHUNK_SIZE` | `240` | Child slice size when parent retrieval is on |
+| `CONTEXTUAL_RETRIEVAL` | `false` | Embed the file and heading with each chunk |
+| `KNOWLEDGE_GRAPH` | `false` | Expand a query along linked file paths |
 | `LOG_LEVEL` | `INFO` | Log level |
 
 Retrieval logs include `hit_count`, `top_score`, `sufficient_evidence`, and `duration_ms`. Answer logs include `citation_count`, `sufficient_evidence`, and `duration_ms`.

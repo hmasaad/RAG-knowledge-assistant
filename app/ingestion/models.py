@@ -43,6 +43,12 @@ class Chunk:
     page: int | None
     heading: str | None
     version: int = 1
+    parent_id: str = ""
+    parent_text: str = ""
+    parent_index: int = -1
+    parent_start: int = -1
+    parent_end: int = -1
+    context: str = ""
 
 
 @dataclass(frozen=True)
