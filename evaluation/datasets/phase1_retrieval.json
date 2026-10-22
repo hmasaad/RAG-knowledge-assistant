@@ -1,0 +1,14 @@
+[
+  {
+    "id": "retry-implementation",
+    "query": "which file implements the retry logic",
+    "expected_substring": "app/http/retry.py",
+    "document": "api-errors.md"
+  },
+  {
+    "id": "timeout-configuration",
+    "query": "where are connect and read timeouts configured",
+    "expected_substring": "app/http/client.py",
+    "document": "api-errors.md"
+  }
+]
