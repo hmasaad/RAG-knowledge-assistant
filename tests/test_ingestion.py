@@ -1,4 +1,5 @@
 import hashlib
+import sqlite3
 from pathlib import Path
 
 import pymupdf
@@ -7,6 +8,7 @@ import pytest
 from app.config import Settings
 from app.ingestion.embeddings import LocalEmbedder
 from app.ingestion.errors import IngestionError
+from app.ingestion.metadata_store import MetadataStore
 from app.ingestion.service import IngestionService
 from app.ingestion.vector_store import VectorStore
 from app.retrieval.search import SearchService
@@ -137,3 +139,65 @@ def test_retrieval_dataset(services: Services) -> None:
         assert hits, case.id
         assert case.expected_substring in hits[0].text
         assert hits[0].filename == case.document
+
+
+def test_legacy_database_assigns_owner_and_visibility(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE documents (
+            id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            checksum TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            chunk_count INTEGER NOT NULL DEFAULT 0,
+            byte_size INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            error TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO documents (
+            id, filename, content_type, checksum, status,
+            chunk_count, byte_size, created_at, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "doc1",
+            "notes.md",
+            "text/markdown",
+            "abc",
+            "indexed",
+            1,
+            10,
+            "2020-01-01T00:00:00+00:00",
+            None,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    store = MetadataStore(path)
+    record = store.get("doc1")
+    other = store.insert_indexing(
+        document_id="doc2",
+        filename="notes.md",
+        content_type="text/markdown",
+        checksum="abc",
+        byte_size=10,
+        owner="ada",
+        visibility="private",
+    )
+    other = store.mark_indexed("doc2", 1)
+
+    assert record is not None
+    assert record.owner == "local"
+    assert record.visibility == "private"
+    assert record.id in store.readable_ids("local")
+    assert record.id not in store.readable_ids("ada")
+    assert other.owner == "ada"
+    assert other.id in store.readable_ids("ada")

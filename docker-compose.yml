@@ -1,0 +1,20 @@
+# One process owns the local Chroma files. Background indexing runs in a thread.
+# To split the worker onto its own process, point both at a Chroma server with
+# CHROMA_HOST and set WORKER_IN_PROCESS=false on the API.
+services:
+  api:
+    build: .
+    environment:
+      EMBEDDING_PROVIDER: local
+      LLM_PROVIDER: local
+      INDEXING_MODE: background
+      SQLITE_PATH: /data/metadata.db
+      BLOB_PATH: /data/blobs
+      CHROMA_PATH: /data/chroma
+    ports:
+      - "8000:8000"
+    volumes:
+      - ragdata:/data
+
+volumes:
+  ragdata:

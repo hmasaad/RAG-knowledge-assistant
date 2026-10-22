@@ -1,0 +1,23 @@
+[
+  {
+    "id": "retry-answer",
+    "question": "which file implements the retry logic",
+    "expect_evidence": true,
+    "expected_substring": "app/http/retry.py",
+    "document": "api-errors.md"
+  },
+  {
+    "id": "timeout-answer",
+    "question": "where are connect and read timeouts configured",
+    "expect_evidence": true,
+    "expected_substring": "app/http/client.py",
+    "document": "api-errors.md"
+  },
+  {
+    "id": "missing-evidence",
+    "question": "what is the office wifi password",
+    "expect_evidence": false,
+    "expected_substring": "",
+    "document": ""
+  }
+]

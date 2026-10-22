@@ -1,0 +1,9 @@
+{
+  "pass_rate": 1.0,
+  "retrieval_recall_at_3": 1.0,
+  "mean_reciprocal_rank": 1.0,
+  "refusal_accuracy": 1.0,
+  "conflict_detection_rate": 1.0,
+  "incorrect_citation_rejection_rate": 1.0,
+  "retrieval_failure_reporting_rate": 1.0
+}

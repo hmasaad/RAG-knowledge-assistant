@@ -20,10 +20,12 @@ def settings(tmp_path: Path) -> Settings:
         embedding_dimension=128,
         chroma_path=tmp_path / "chroma",
         sqlite_path=tmp_path / "metadata.db",
+        blob_path=tmp_path / "blobs",
         chunk_size=500,
         chunk_overlap=40,
         max_upload_bytes=100_000,
         log_level="WARNING",
+        llm_provider="local",
     )
 
 

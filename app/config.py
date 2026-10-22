@@ -25,6 +25,22 @@ class Settings(BaseSettings):
     chunk_size: int = Field(default=800, ge=1)
     chunk_overlap: int = Field(default=120, ge=0)
     max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
+    llm_provider: Literal["openai", "local"] = "openai"
+    chat_model: str = "gpt-4o-mini"
+    retrieval_candidates: int = Field(default=20, ge=1, le=100)
+    rrf_k: int = Field(default=60, ge=1)
+    rerank_coverage_weight: float = Field(default=0.35, ge=0, le=1)
+    evidence_min_coverage: float = Field(default=0.5, ge=0, le=1)
+    blob_path: Path = Path("data/blobs")
+    chroma_host: str = ""
+    chroma_port: int = Field(default=8000, ge=1, le=65535)
+    indexing_mode: Literal["inline", "background"] = "inline"
+    worker_in_process: bool = True
+    worker_poll_seconds: float = Field(default=1.0, gt=0, le=60)
+    job_timeout_seconds: float = Field(default=900, gt=0)
+    embedding_cache_size: int = Field(default=4096, ge=0)
+    answer_cache_size: int = Field(default=256, ge=0)
+    default_user_id: str = "local"
     log_level: str = "INFO"
 
     model_config = SettingsConfigDict(

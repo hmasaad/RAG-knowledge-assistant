@@ -42,6 +42,7 @@ class Chunk:
     end_char: int
     page: int | None
     heading: str | None
+    version: int = 1
 
 
 @dataclass(frozen=True)
@@ -55,3 +56,31 @@ class DocumentRecord:
     byte_size: int
     created_at: str
     error: str | None = None
+    owner: str = "local"
+    visibility: str = "private"
+    version: int = 1
+    indexed_version: int = 0
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class VersionRecord:
+    document_id: str
+    version: int
+    filename: str
+    content_type: str
+    checksum: str
+    byte_size: int
+    chunk_count: int
+    status: str
+    created_at: str
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class JobRecord:
+    id: str
+    document_id: str
+    version: int
+    status: str
+    attempts: int

@@ -4,6 +4,7 @@ Embeddings are always supplied by the caller. The collection does not download
 or run a default embedding model.
 """
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -61,12 +62,21 @@ class VectorHit:
 
 
 class VectorStore:
-    def __init__(self, path: Path, collection_name: str) -> None:
-        path.mkdir(parents=True, exist_ok=True)
-        self._client = chromadb.PersistentClient(
-            path=str(path),
-            settings=chromadb.Settings(anonymized_telemetry=False),
-        )
+    def __init__(
+        self,
+        path: Path,
+        collection_name: str,
+        *,
+        host: str = "",
+        port: int = 8000,
+    ) -> None:
+        self._lock = threading.RLock()
+        client_settings = chromadb.Settings(anonymized_telemetry=False)
+        if host:
+            self._client = chromadb.HttpClient(host=host, port=port, settings=client_settings)
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+            self._client = chromadb.PersistentClient(path=str(path), settings=client_settings)
         self._collection = self._client.get_or_create_collection(
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
@@ -74,31 +84,68 @@ class VectorStore:
         )
 
     def count(self) -> int:
-        return int(self._collection.count())
+        with self._lock:
+            return int(self._collection.count())
+
+    def list_chunks(self, *, document_ids: set[str] | None = None) -> list[VectorHit]:
+        """Return indexed chunks, optionally limited to the caller's documents."""
+        if document_ids is not None and not document_ids:
+            return []
+        with self._lock:
+            if self._collection.count() == 0:
+                return []
+            where = _document_filter(document_ids)
+            result = self._collection.get(where=where, include=["documents", "metadatas"])
+        hits: list[VectorHit] = []
+        ids = result.get("ids") or []
+        documents = result.get("documents") or []
+        metadatas = result.get("metadatas") or []
+        for chunk_id, text, metadata in zip(ids, documents, metadatas, strict=False):
+            hits.append(
+                VectorHit(
+                    chunk_id=chunk_id,
+                    text=text or "",
+                    score=0.0,
+                    metadata=dict(metadata or {}),
+                )
+            )
+        return hits
 
     def add(self, chunks: list[Chunk], embeddings: list[list[float]]) -> None:
         if len(chunks) != len(embeddings):
             raise ValueError("Each chunk needs one embedding.")
-        batch_size = 100
-        for start in range(0, len(chunks), batch_size):
-            batch = chunks[start : start + batch_size]
-            vectors = embeddings[start : start + batch_size]
-            self._collection.add(
-                ids=[chunk.id for chunk in batch],
-                documents=[chunk.text for chunk in batch],
-                embeddings=vectors,
-                metadatas=[_metadata(chunk) for chunk in batch],
-            )
+        with self._lock:
+            batch_size = 100
+            for start in range(0, len(chunks), batch_size):
+                batch = chunks[start : start + batch_size]
+                vectors = embeddings[start : start + batch_size]
+                self._collection.add(
+                    ids=[chunk.id for chunk in batch],
+                    documents=[chunk.text for chunk in batch],
+                    embeddings=vectors,
+                    metadatas=[_metadata(chunk) for chunk in batch],
+                )
 
-    def query(self, embedding: list[float], top_k: int) -> list[VectorHit]:
-        total = self.count()
-        if total == 0 or top_k < 1:
+    def query(
+        self,
+        embedding: list[float],
+        top_k: int,
+        *,
+        document_ids: set[str] | None = None,
+    ) -> list[VectorHit]:
+        if top_k < 1 or (document_ids is not None and not document_ids):
             return []
-        result = self._collection.query(
-            query_embeddings=[embedding],
-            n_results=min(top_k, total),
-            include=["documents", "metadatas", "distances"],
-        )
+        with self._lock:
+            where = _document_filter(document_ids)
+            available = self._match_count(where)
+            if available == 0:
+                return []
+            result = self._collection.query(
+                query_embeddings=[embedding],
+                n_results=min(top_k, available),
+                include=["documents", "metadatas", "distances"],
+                where=where,
+            )
         ids = result.get("ids") or [[]]
         documents = result.get("documents") or [[]]
         metadatas = result.get("metadatas") or [[]]
@@ -121,17 +168,25 @@ class VectorStore:
             )
         return hits
 
-    def chunks_for_document(self, document_id: str) -> list[dict[str, Any]]:
-        result = self._collection.get(
-            where={"document_id": document_id},
-            include=["documents", "metadatas"],
-        )
+    def chunks_for_document(
+        self,
+        document_id: str,
+        *,
+        version: int | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            result = self._collection.get(
+                where={"document_id": document_id},
+                include=["documents", "metadatas"],
+            )
         rows: list[dict[str, Any]] = []
         ids = result.get("ids") or []
         documents = result.get("documents") or []
         metadatas = result.get("metadatas") or []
         for chunk_id, text, metadata in zip(ids, documents, metadatas, strict=False):
             meta = dict(metadata or {})
+            if version is not None and chunk_version(meta) != version:
+                continue
             rows.append(
                 {
                     "id": chunk_id,
@@ -147,10 +202,50 @@ class VectorStore:
         return rows
 
     def delete_document(self, document_id: str) -> None:
-        existing = self._collection.get(where={"document_id": document_id})
-        ids = existing.get("ids") or []
-        if ids:
-            self._collection.delete(ids=ids)
+        self._delete_where(document_id, keep_version=None, drop_version=None)
+
+    def delete_version(self, document_id: str, version: int) -> None:
+        self._delete_where(document_id, keep_version=None, drop_version=version)
+
+    def delete_other_versions(self, document_id: str, keep_version: int) -> None:
+        self._delete_where(document_id, keep_version=keep_version, drop_version=None)
+
+    def _delete_where(
+        self,
+        document_id: str,
+        *,
+        keep_version: int | None,
+        drop_version: int | None,
+    ) -> None:
+        with self._lock:
+            existing = self._collection.get(
+                where={"document_id": document_id},
+                include=["metadatas"],
+            )
+            ids = existing.get("ids") or []
+            metadatas = existing.get("metadatas") or []
+            stale: list[str] = []
+            for chunk_id, metadata in zip(ids, metadatas, strict=False):
+                version = chunk_version(metadata or {})
+                if drop_version is not None and version != drop_version:
+                    continue
+                if keep_version is not None and version == keep_version:
+                    continue
+                stale.append(chunk_id)
+            if stale:
+                self._collection.delete(ids=stale)
+
+    def _match_count(self, where: dict[str, Any] | None) -> int:
+        if where is None:
+            return self.count()
+        result = self._collection.get(where=where, include=[])
+        return len(result.get("ids") or [])
+
+
+def _document_filter(document_ids: set[str] | None) -> dict[str, Any] | None:
+    if document_ids is None:
+        return None
+    return {"document_id": {"$in": sorted(document_ids)}}
 
 
 def _metadata(chunk: Chunk) -> dict[str, Any]:
@@ -163,7 +258,18 @@ def _metadata(chunk: Chunk) -> dict[str, Any]:
         "end_char": chunk.end_char,
         "page": chunk.page if chunk.page is not None else _PAGE_MISSING,
         "heading": chunk.heading or "",
+        "version": chunk.version,
     }
+
+
+def chunk_version(metadata: dict[str, Any] | None) -> int:
+    """Version stored on a chunk. Chunks written before versioning count as 1."""
+    if not metadata:
+        return 1
+    value = metadata.get("version")
+    if value is None or value == "":
+        return 1
+    return int(value)
 
 
 def _optional_page(value: Any) -> int | None:

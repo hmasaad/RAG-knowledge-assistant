@@ -1,8 +1,8 @@
-"""Errors raised while accepting or indexing a document."""
+"""Errors returned by the API."""
 
 
-class IngestionError(Exception):
-    """A document could not be accepted or indexed.
+class KnowledgeError(Exception):
+    """A request could not be completed.
 
     ``status_code`` is the HTTP status the API should return.
     """
@@ -11,3 +11,7 @@ class IngestionError(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+class IngestionError(KnowledgeError):
+    """A document could not be accepted or indexed."""
