@@ -1,0 +1,93 @@
+[
+  {
+    "id": "supported-three",
+    "claim": "The retry limit is three attempts.",
+    "documents": ["retry-limit-three.md"],
+    "verdict": "supported",
+    "contradiction": false
+  },
+  {
+    "id": "contradicted-quantity",
+    "claim": "The retry limit is three attempts.",
+    "documents": ["retry-limit-three.md", "retry-limit-five.md"],
+    "verdict": "contradicted",
+    "contradiction": true
+  },
+  {
+    "id": "partial-version",
+    "claim": "The retry limit is three attempts in version 2.",
+    "documents": ["retry-limit-three.md"],
+    "verdict": "partially_supported",
+    "contradiction": false
+  },
+  {
+    "id": "insufficient-wifi",
+    "claim": "The office wifi password is violet.",
+    "documents": ["retry-limit-three.md"],
+    "verdict": "insufficient",
+    "contradiction": false
+  },
+  {
+    "id": "date-is-not-a-contradiction",
+    "claim": "In 2024 the retry limit is three attempts.",
+    "documents": ["retry-limit-2024.md", "retry-limit-2023.md"],
+    "verdict": "supported",
+    "contradiction": false
+  },
+  {
+    "id": "version-is-not-a-contradiction",
+    "claim": "In version 2 the retry limit is three attempts.",
+    "documents": ["retry-limit-v2.md", "retry-limit-v1.md"],
+    "verdict": "supported",
+    "contradiction": false
+  },
+  {
+    "id": "qualifier-is-not-a-contradiction",
+    "claim": "The default retry limit is three attempts.",
+    "documents": ["retry-default-three.md", "retry-maximum-five.md"],
+    "verdict": "supported",
+    "contradiction": false
+  },
+  {
+    "id": "contradicted-same-qualifier",
+    "claim": "The default retry limit is three attempts.",
+    "documents": ["retry-default-three.md", "retry-default-five.md"],
+    "verdict": "contradicted",
+    "contradiction": true
+  },
+  {
+    "id": "contradicted-negation",
+    "claim": "The retry limit is three attempts.",
+    "documents": ["retry-not-three.md"],
+    "verdict": "contradicted",
+    "contradiction": true
+  },
+  {
+    "id": "unit-is-not-a-contradiction",
+    "claim": "The retry limit is three attempts.",
+    "documents": ["retry-limit-three.md", "retry-limit-seconds.md"],
+    "verdict": "supported",
+    "contradiction": false
+  },
+  {
+    "id": "population-is-not-a-contradiction",
+    "claim": "In production the retry limit is three attempts.",
+    "documents": ["retry-production-three.md", "retry-staging-five.md"],
+    "verdict": "supported",
+    "contradiction": false
+  },
+  {
+    "id": "condition-is-not-a-contradiction",
+    "claim": "The retry limit is three attempts when the request times out.",
+    "documents": ["retry-when-timeout.md", "retry-when-success.md"],
+    "verdict": "supported",
+    "contradiction": false
+  },
+  {
+    "id": "injected-instructions-are-ignored",
+    "claim": "The retry limit is three attempts.",
+    "documents": ["injected-retry.md"],
+    "verdict": "supported",
+    "contradiction": false
+  }
+]

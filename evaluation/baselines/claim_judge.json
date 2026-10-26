@@ -1,0 +1,6 @@
+{
+  "verification_precision": 1.0,
+  "verification_recall": 1.0,
+  "contradiction_precision": 1.0,
+  "contradiction_recall": 1.0
+}

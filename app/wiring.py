@@ -14,6 +14,9 @@ from app.ingestion.vector_store import VectorStore
 from app.observability.cache import LruCache
 from app.observability.metrics import Metrics
 from app.observability.tracing import TraceLog
+from app.research.judge import ClaimJudgeAdapter, LazyClaimJudge
+from app.research.rag import KnowledgeRagClient
+from app.research.service import ResearchReport, ResearchService
 from app.retrieval.rerank import build_reranker
 from app.retrieval.search import RetrievalResult, SearchService
 from app.storage.blobs import BlobStore, LocalBlobStore
@@ -29,6 +32,8 @@ class Services:
     ingestion: IngestionService
     search: SearchService
     generation: GenerationService
+    research: ResearchService
+    claim_judge: ClaimJudgeAdapter
     traces: TraceLog
 
 
@@ -137,6 +142,26 @@ def build_services(
         default_user_id=settings.default_user_id,
         agent_enabled=settings.agent_enabled,
     )
+    research = ResearchService(
+        retrieval=search,
+        answerer=resolved_answerer,
+        metadata=metadata,
+        cache=LruCache[tuple[object, ...], ResearchReport](settings.answer_cache_size),
+        metrics=metrics,
+        traces=traces,
+        default_user_id=settings.default_user_id,
+        search_budget=settings.research_search_budget,
+        search_timeout=settings.research_timeout_seconds,
+    )
+    claim_judge = ClaimJudgeAdapter(
+        rag=KnowledgeRagClient(search, timeout=settings.research_timeout_seconds),
+        judge=LazyClaimJudge(
+            provider=settings.llm_provider,
+            api_key=settings.openai_api_key,
+            model=settings.chat_model,
+        ),
+        metadata=metadata,
+    )
     return Services(
         settings=settings,
         metadata=metadata,
@@ -146,6 +171,8 @@ def build_services(
         ingestion=ingestion,
         search=search,
         generation=generation,
+        research=research,
+        claim_judge=claim_judge,
         traces=traces,
     )
 

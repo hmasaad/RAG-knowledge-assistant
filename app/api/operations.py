@@ -15,6 +15,7 @@ class TraceStepResponse(BaseModel):
     query: str | None = None
     sufficient_evidence: bool | None = None
     hit_count: int | None = None
+    tool: str | None = None
 
 
 class TraceResponse(BaseModel):

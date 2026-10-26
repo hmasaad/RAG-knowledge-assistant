@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     embedding_cache_size: int = Field(default=4096, ge=0)
     answer_cache_size: int = Field(default=256, ge=0)
     agent_enabled: bool = True
+    research_search_budget: int = Field(default=16, ge=1, le=100)
+    research_timeout_seconds: float = Field(default=30, gt=0, le=120)
     default_user_id: str = "local"
     log_level: str = "INFO"
 

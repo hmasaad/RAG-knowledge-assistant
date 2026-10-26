@@ -195,3 +195,133 @@ class AnswerResponse(BaseModel):
     passages: list[PassageResponse]
     action: str = "answer"
     trace_id: str = ""
+
+
+class ResearchSubquestionResponse(BaseModel):
+    question: str
+    tool: str
+    status: str
+    evidence: str
+    completion: str = ""
+    complete: bool = False
+
+
+class EvidenceResponse(BaseModel):
+    evidence_id: str
+    claim_id: str
+    claim: str
+    passage_id: str
+    document_id: str
+    filename: str
+    content_type: str
+    heading: str | None = None
+    page: int | None = None
+    start_char: int
+    end_char: int
+    score: float
+    created_at: str
+    verdict: str = "supported"
+    support: float | None = None
+
+
+class ClaimLinkResponse(BaseModel):
+    claim_id: str
+    passage_id: str
+    evidence_id: str
+
+
+class ClaimJudgeRequest(BaseModel):
+    claim: str = Field(min_length=1, max_length=4000)
+    top_k: int = Field(default=4, ge=1, le=20)
+
+    @field_validator("claim")
+    @classmethod
+    def claim_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Claim must not be empty.")
+        return stripped
+
+
+class JudgeEvidenceResponse(BaseModel):
+    evidence_id: str
+    document_id: str
+    filename: str
+    text: str
+    role: str
+    score: float
+    start_char: int
+    end_char: int
+    heading: str | None = None
+    page: int | None = None
+    instruction_detected: bool = False
+
+
+class GraphNodeResponse(BaseModel):
+    id: str
+    kind: str
+    label: str
+    document_id: str = ""
+    version: int = 0
+    filename: str = ""
+    content_type: str = ""
+    checksum: str = ""
+    chunk_id: str = ""
+    heading: str | None = None
+    page: int | None = None
+    start_char: int = 0
+    end_char: int = 0
+
+
+class GraphEdgeResponse(BaseModel):
+    source: str
+    relation: str
+    target: str
+
+
+class EvidenceGraphResponse(BaseModel):
+    nodes: list[GraphNodeResponse] = []
+    edges: list[GraphEdgeResponse] = []
+
+
+class ClaimJudgeResponse(BaseModel):
+    claim: str
+    verdict: str
+    evidence_ids: list[str]
+    support_ids: list[str]
+    oppose_ids: list[str]
+    contradiction: bool
+    reason: str
+    evidence: list[JudgeEvidenceResponse] = []
+    accepted: bool = True
+    graph: EvidenceGraphResponse = Field(default_factory=EvidenceGraphResponse)
+
+
+class ConflictResponse(BaseModel):
+    summary: str
+    left_filename: str
+    right_filename: str
+    left_values: list[int]
+    right_values: list[int]
+    left_claim_id: str = ""
+    right_claim_id: str = ""
+
+
+class ResearchResponse(BaseModel):
+    question: str
+    report: str
+    sufficient_evidence: bool
+    conflict: bool = False
+    tools: list[str]
+    subquestions: list[ResearchSubquestionResponse]
+    contradictions: list[str]
+    gaps: list[str]
+    catalog: list[str]
+    citations: list[CitationResponse]
+    passages: list[PassageResponse]
+    evidence: list[EvidenceResponse] = []
+    links: list[ClaimLinkResponse] = []
+    conflicts: list[ConflictResponse] = []
+    graph: EvidenceGraphResponse = Field(default_factory=EvidenceGraphResponse)
+    action: str
+    trace_id: str = ""

@@ -83,6 +83,12 @@ Repeated question and passage text is cached. Answers are cached until a documen
 
 Each answer records a trace. The response includes `action` and `trace_id`. `action` is `clarify` when the question does not name a topic, `retry` when a shorter query was required, `answer` when the first search was enough, and `refuse` when the evidence is still missing. `GET /api/traces/{trace_id}` returns those steps.
 
+`POST /api/research` investigates a question in steps. The planner turns one request into independent subquestions, and each subquestion has a completion criterion: a cited claim must be supported by a retrieved passage. `knowledge` searches the indexed collection through `search(query, filters, top_k)`, which returns ranked passages, document ids, source locations, and relevance scores. `catalog` lists visible documents when the question asks which documents, files, or sources exist. `graph` follows a file path to the paths recorded with it. Each search counts against `RESEARCH_SEARCH_BUDGET`. A weak search is retried once when budget remains. A timeout or a malformed retrieval response becomes an evidence gap for that subquestion. Accepted claims are stored with an evidence id, a source reference, a timestamp, a support score, and a link to the supporting passage. A claim is kept when at least 60% of its content words appear in that passage. Claims from different documents that state different numbers are returned in `conflicts`, with both filenames and both values. Disagreements are also listed under contradictions. The report's `action` is `clarify`, `research`, or `refuse`.
+
+`POST /api/claims/judge` retrieves supporting and opposing passages for one claim through the same search interface. The production judge is `LLMClaimJudge`: it asks the chat model for a schema-checked JSON verdict and keeps only evidence ids that were retrieved. A contradiction is kept only when the passages share scope, dates, versions, units, populations, conditions, and qualifiers and then disagree on a quantity or one passage denies the claim. A different date, version, unit, population, condition, or qualifier is a different fact. Instruction lines in a source document are stripped before the model sees the text, and each cited passage keeps its filename and character offsets. `evaluation/datasets/claim_judge.json` is the verification benchmark, and the baseline reports precision and recall separately for verification and for contradiction detection.
+
+Each research report and claim verdict includes an evidence graph. Nodes are claims, passages, documents, versions, and sources. Edges record that a passage supports or contradicts a claim, that a passage was extracted from a document version, and the exact source offsets. That graph is what later report steps use to reason across documents.
+
 `POST /api/operations/recover` queues failed versions again and rebuilds any indexed version whose vectors are missing. Inline mode finishes that work in the request. Background mode leaves it on the worker queue. The previous indexed version stays searchable until the replacement finishes.
 
 One container is enough for a single host. It keeps SQLite, the original bytes, and Chroma on one volume, and indexes in a background thread:
@@ -163,6 +169,8 @@ Indirect prompt injection is stripped before ranking and answering. Private docu
 | `EMBEDDING_CACHE_SIZE` | `4096` | Cached passage and query embeddings |
 | `ANSWER_CACHE_SIZE` | `256` | Cached answers for an unchanged catalog |
 | `AGENT_ENABLED` | `true` | Clarify, search, or retry before answering |
+| `RESEARCH_SEARCH_BUDGET` | `16` | Knowledge searches one research request may run |
+| `RESEARCH_TIMEOUT_SECONDS` | `30` | Limit for one research search |
 | `RETRIEVAL_CANDIDATES` | `20` | Vector and lexical candidates before fusion |
 | `RRF_K` | `60` | Reciprocal-rank fusion constant |
 | `RERANK_COVERAGE_WEIGHT` | `0.35` | Weight of term coverage in the default score |

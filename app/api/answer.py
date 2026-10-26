@@ -22,20 +22,21 @@ def answer(
         answer=result.answer,
         sufficient_evidence=result.sufficient_evidence,
         conflict=result.conflict,
-        citations=[
-            CitationResponse(
-                marker=citation.marker,
-                chunk_id=citation.chunk_id,
-                document_id=citation.document_id,
-                filename=citation.filename,
-                content_type=citation.content_type,
-                heading=citation.heading,
-                page=citation.page,
-                quote=citation.quote,
-            )
-            for citation in result.citations
-        ],
+        citations=[_citation_response(citation) for citation in result.citations],
         passages=[passage_response(passage) for passage in result.passages],
         action=result.action,
         trace_id=result.trace_id,
+    )
+
+
+def _citation_response(citation) -> CitationResponse:
+    return CitationResponse(
+        marker=citation.marker,
+        chunk_id=citation.chunk_id,
+        document_id=citation.document_id,
+        filename=citation.filename,
+        content_type=citation.content_type,
+        heading=citation.heading,
+        page=citation.page,
+        quote=citation.quote,
     )
