@@ -13,7 +13,7 @@ An answer includes citation markers such as `[1]` and the source file, heading, 
 - `app/security` upload validation, document visibility, and stripping of instructions inside passages
 - `app/observability` JSON logs and a `/metrics` endpoint
 - `app/storage` content-addressed bytes for each document version
-- `evaluation` retrieval, answer, and quality cases, plus the metric baseline
+- `evaluation` retrieval, answer, research, and quality cases, plus the metric baselines
 - `samples` example knowledge-base documents
 
 ## Setup
@@ -41,6 +41,8 @@ The local embedder is a hashed bag-of-words, and the local answerer quotes the b
 ```bash
 uvicorn app.main:app --reload
 ```
+
+Open `http://127.0.0.1:8000/` to upload documents, ask a grounded question, or run the research agent. The page sends `X-User-Id` with each request and can resume a stored research session.
 
 Index a document, inspect the retrieved passages, then ask a question:
 
@@ -70,22 +72,28 @@ Chunk offsets are positions in the cleaned page text. PDF chunks include a 1-bas
 
 ## Operate
 
-`INDEXING_MODE=inline` embeds during the request. `INDEXING_MODE=background` stores the bytes, records a job, and returns `202` with `status: "queued"`. With `WORKER_IN_PROCESS=true` the API process drains that queue. For a separate worker:
+`INDEXING_MODE=inline` embeds during the request and finishes a research cycle in the same call. `INDEXING_MODE=background` stores the bytes, records a job, and returns `202` with `status: "queued"`. Research cycles use that same queue: `POST /api/research/cycle` returns `202` and the worker runs the remaining retrieve–verify–synthesize steps. With `WORKER_IN_PROCESS=true` the API process drains that queue. For a separate worker:
 
 ```bash
 INDEXING_MODE=background WORKER_IN_PROCESS=false uvicorn app.main:app
 python -m app.worker
 ```
 
-The API and the worker share `SQLITE_PATH` and `BLOB_PATH`. A local Chroma directory is safe for one process. Set `CHROMA_HOST` when more than one process reads or writes vectors. A job left in `running` longer than `JOB_TIMEOUT_SECONDS` is queued again.
+The API and the worker share `SQLITE_PATH` and `BLOB_PATH`. A local Chroma directory is safe for one process. Set `CHROMA_HOST` when more than one process reads or writes vectors. A job left in `running` longer than `JOB_TIMEOUT_SECONDS` is queued again. The production orchestrator claims up to `RESEARCH_WORKER_CONCURRENCY` sessions at once, prefers a higher `priority`, and leaves a user at `RESEARCH_USER_CONCURRENCY` running jobs. `POST /api/research/sessions/{id}/cancel` stops a queued job immediately and stops a running job at the next committed step. Resume puts a cancelled session back on the queue.
 
-Repeated question and passage text is cached. Answers are cached until a document is indexed, deleted, or its visibility changes. Unchanged sections of an updated document reuse the embedding cache, so a new version does not re-embed text that did not change. `GET /health` reports queue depth and the catalog generation. `GET /ready` checks that metadata and vectors can be read. `GET /metrics` exposes counters and timings.
+Repeated question and passage text is cached. Answers are cached until a document is indexed, deleted, or its visibility changes. Unchanged sections of an updated document reuse the embedding cache, so a new version does not re-embed text that did not change. `GET /health` reports queue depth and the catalog generation. `GET /ready` checks that metadata and vectors can be read. `GET /metrics` exposes counters and timings. Research requests add `rag_research_seconds`, `rag_research_action_seconds`, `rag_research_cost_total`, `rag_research_retries_total`, and `rag_research_failures_total`. Retries are labeled `search`, `gap`, or `conflict`. Failures are labeled `budget`, `permission`, `timeout`, `invalid`, `duplicate`, `iteration`, or `error`.
 
 Each answer records a trace. The response includes `action` and `trace_id`. `action` is `clarify` when the question does not name a topic, `retry` when a shorter query was required, `answer` when the first search was enough, and `refuse` when the evidence is still missing. `GET /api/traces/{trace_id}` returns those steps.
 
 `POST /api/research` investigates a question in steps. The planner turns one request into independent subquestions, and each subquestion has a completion criterion: a cited claim must be supported by a retrieved passage. `knowledge` searches the indexed collection through `search(query, filters, top_k)`, which returns ranked passages, document ids, source locations, and relevance scores. `catalog` lists visible documents when the question asks which documents, files, or sources exist. `graph` follows a file path to the paths recorded with it. Each search counts against `RESEARCH_SEARCH_BUDGET`. A weak search is retried once when budget remains. A timeout or a malformed retrieval response becomes an evidence gap for that subquestion. Accepted claims are stored with an evidence id, a source reference, a timestamp, a support score, and a link to the supporting passage. A claim is kept when at least 60% of its content words appear in that passage. Claims from different documents that state different numbers are returned in `conflicts`, with both filenames and both values. Disagreements are also listed under contradictions. The report's `action` is `clarify`, `research`, or `refuse`.
 
 `POST /api/claims/judge` retrieves supporting and opposing passages for one claim through the same search interface. The production judge is `LLMClaimJudge`: it asks the chat model for a schema-checked JSON verdict and keeps only evidence ids that were retrieved. A contradiction is kept only when the passages share scope, dates, versions, units, populations, conditions, and qualifiers and then disagree on a quantity or one passage denies the claim. A different date, version, unit, population, condition, or qualifier is a different fact. Instruction lines in a source document are stripped before the model sees the text, and each cited passage keeps its filename and character offsets. `evaluation/datasets/claim_judge.json` is the verification benchmark, and the baseline reports precision and recall separately for verification and for contradiction detection.
+
+The research worker starts with mock action adapters. RAG search, claim verification, and the evidence graph are registered one at a time; they are not treated as wired just because the modules exist. `knowledge` searches the collection, `catalog` lists visible documents, and `graph` returns related file paths. An unknown tool is rejected. Catalog and graph lookups do not spend the search budget.
+
+Actions go through a dispatcher that does not depend on a specific model, vector store, or database. The allowed actions are `search`, `fill_gaps`, `resolve_contradictions`, `reverify`, and `synthesize`. Budget and safety guardrails check every tool call and action for remaining cost, an approved tool or action, and a matching caller. A quality recommendation to gather more evidence cannot run when the search budget is gone. `RESEARCH_DENIED_TOOLS` blocks named tools. `RESEARCH_MAX_COST` caps action cost when it is set above zero; otherwise the search budget is the cost ceiling. Each action is checked for required inputs, iteration limits, and remaining budget before it runs. The worker then records evidence, verdicts, gaps, provenance, errors, and cost. A repeated action with the same query is rejected. The durable research state manager checkpoints each finished action and the session snapshot in one write, holds a lease while a worker is running, and restores executed fingerprints after a crash, timeout, retry, or restart so the same search is not run again. `halt_after` on `POST /api/research/cycle` stops the cycle after that many newly committed adapter runs and stores the session as `halted`. Restart the process and `POST /api/research/sessions/{id}/resume` continues from that checkpoint. `side_effects` counts how many times each adapter actually ran; a resumed search stays at `1`. `POST /api/research/cycle` runs that sequence and stores a session so a later call can resume from the last finished step. `GET /api/research/sessions/{id}` returns the stored report. `POST /api/research/sessions/{id}/resume` continues a failed or interrupted cycle. A job left in `running` longer than `JOB_TIMEOUT_SECONDS` is queued again.
+
+After the planned searches, an adaptive loop decides whether to retry a gap, probe an unresolved contradiction, or stop. It looks at the quality evaluator's recommendation, open contradictions, missing information, and the remaining search budget. `decision` is `report`, `retry`, `probe_conflict`, or `stop`. The report also includes `quality_action`, `quality_reason`, and `quality_failures`. `RESEARCH_ADAPT_ROUNDS` limits how many extra searches that loop may run.
 
 Each research report and claim verdict includes an evidence graph. Nodes are claims, passages, documents, versions, and sources. Edges record that a passage supports or contradicts a claim, that a passage was extracted from a document version, and the exact source offsets. That graph is what later report steps use to reason across documents.
 
@@ -140,6 +148,10 @@ pytest
 
 `evaluation/datasets/rag_metrics.json` scores Recall@K, MRR, nDCG, faithfulness, answer relevance, and citation correctness. Faithfulness is the share of a cited claim that appears in that passage. Answer relevance is the share of question words the passages can support that also appear in the answer. A refusal is faithful, and it is relevant when the question should be refused. Citation correctness requires the marker to name a relevant passage and clear the faithfulness bar.
 
+`evaluation/datasets/research_quality.json` scores the research agent on reliability, not on whether the cycle finished. Each cited claim is scored first for citation existence and support, then those claim scores are averaged. The evaluator also measures completeness, factual support, citation validity, source diversity, freshness when a cutoff is given, and unresolved contradictions. Failures are labeled as missing evidence, unsupported claims, conflicting evidence, stale sources, or an incomplete answer. That classification recommends `fill_gaps`, `reverify`, `resolve_contradictions`, or `stop` to the adaptive research loop. A completed workflow that invents a claim still fails. `evaluation/baselines/research_quality.json` is the floor.
+
+`evaluation/datasets/research_e2e.json` is the end-to-end gate. Each case indexes the known documents once, runs the cycle or the planner, checks the report against the known answer, and judges a reviewed claim on that same evidence. A two-clause planner case also requires exactly two searches. `evaluation/baselines/research_e2e.json` is the floor.
+
 Indirect prompt injection is stripped before ranking and answering. Private documents are left out of search for other callers. An answer that repeats a canary, API key, password, or secret from a document the caller cannot read is replaced by the refusal. A chunk that repeats one word enough to crowd out ordinary prose is left out of ranking, so a poisoned document cannot win on keyword stuffing.
 
 ## Configuration
@@ -170,7 +182,12 @@ Indirect prompt injection is stripped before ranking and answering. Private docu
 | `ANSWER_CACHE_SIZE` | `256` | Cached answers for an unchanged catalog |
 | `AGENT_ENABLED` | `true` | Clarify, search, or retry before answering |
 | `RESEARCH_SEARCH_BUDGET` | `16` | Knowledge searches one research request may run |
+| `RESEARCH_MAX_COST` | `0` | Action-cost ceiling; `0` uses the search budget |
+| `RESEARCH_DENIED_TOOLS` | empty | Comma-separated tools the worker must not run |
 | `RESEARCH_TIMEOUT_SECONDS` | `30` | Limit for one research search |
+| `RESEARCH_ADAPT_ROUNDS` | `2` | Extra searches after the planned tasks |
+| `RESEARCH_WORKER_CONCURRENCY` | `2` | Research sessions one worker may claim at once |
+| `RESEARCH_USER_CONCURRENCY` | `2` | Running research sessions one caller may hold |
 | `RETRIEVAL_CANDIDATES` | `20` | Vector and lexical candidates before fusion |
 | `RRF_K` | `60` | Reciprocal-rank fusion constant |
 | `RERANK_COVERAGE_WEIGHT` | `0.35` | Weight of term coverage in the default score |

@@ -56,7 +56,12 @@ class Settings(BaseSettings):
     answer_cache_size: int = Field(default=256, ge=0)
     agent_enabled: bool = True
     research_search_budget: int = Field(default=16, ge=1, le=100)
+    research_max_cost: int = Field(default=0, ge=0, le=200)
+    research_denied_tools: str = ""
     research_timeout_seconds: float = Field(default=30, gt=0, le=120)
+    research_adapt_rounds: int = Field(default=2, ge=0, le=8)
+    research_worker_concurrency: int = Field(default=2, ge=1, le=16)
+    research_user_concurrency: int = Field(default=2, ge=1, le=16)
     default_user_id: str = "local"
     log_level: str = "INFO"
 

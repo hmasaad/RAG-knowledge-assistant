@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Knowledge Assistant</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <p class="eyebrow">RAG Knowledge Assistant</p>
+        <h1>Ask from your documents</h1>
+      </div>
+      <div class="identity">
+        <label for="user-id">User id</label>
+        <input id="user-id" type="text" value="local" autocomplete="username" />
+        <p id="health" class="health">Checking…</p>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button type="button" class="tab is-active" data-tab="library" role="tab">Library</button>
+      <button type="button" class="tab" data-tab="ask" role="tab">Ask</button>
+      <button type="button" class="tab" data-tab="research" role="tab">Research</button>
+    </nav>
+
+    <main>
+      <section id="panel-library" class="panel is-active" role="tabpanel">
+        <form id="upload-form" class="card">
+          <h2>Index a document</h2>
+          <p class="hint">Markdown, PDF, text, AsciiDoc, or source files. Answers only use what you upload.</p>
+          <label class="file">
+            <input id="file" name="file" type="file" required />
+            <span>Choose file</span>
+          </label>
+          <label>
+            Visibility
+            <select id="visibility" name="visibility">
+              <option value="private">Private</option>
+              <option value="shared">Shared</option>
+            </select>
+          </label>
+          <button type="submit">Upload and index</button>
+          <p id="upload-status" class="status" aria-live="polite"></p>
+        </form>
+        <div class="card">
+          <div class="row">
+            <h2>Documents</h2>
+            <button type="button" id="refresh-docs" class="ghost">Refresh</button>
+          </div>
+          <ul id="documents" class="list"></ul>
+        </div>
+      </section>
+
+      <section id="panel-ask" class="panel" role="tabpanel" hidden>
+        <form id="ask-form" class="card">
+          <h2>Grounded answer</h2>
+          <label>
+            Question
+            <textarea id="ask-question" rows="3" required placeholder="Which file implements the retry logic?"></textarea>
+          </label>
+          <label>
+            Passages
+            <input id="ask-top-k" type="number" min="1" max="20" value="4" />
+          </label>
+          <button type="submit">Ask</button>
+        </form>
+        <article id="ask-result" class="card result" hidden></article>
+      </section>
+
+      <section id="panel-research" class="panel" role="tabpanel" hidden>
+        <div class="split">
+          <form id="research-form" class="card">
+            <h2>Research agent</h2>
+            <p class="hint">Retrieve, verify claims, fill gaps, then synthesize a cited report. Sessions survive a restart.</p>
+            <label>
+              Question
+              <textarea id="research-question" rows="4" required placeholder="Which file implements the retry logic and where are timeouts configured?"></textarea>
+            </label>
+            <label>
+              Mode
+              <select id="research-mode">
+                <option value="cycle">Cycle (retrieve → verify → fill gaps → cite)</option>
+                <option value="plan">Planner (subquestions and adaptive loop)</option>
+              </select>
+            </label>
+            <label>
+              Passages
+              <input id="research-top-k" type="number" min="1" max="20" value="4" />
+            </label>
+            <label>
+              <input id="halt-after" type="checkbox" />
+              Stop after the first committed step
+            </label>
+            <button type="submit">Run research</button>
+            <p id="research-status" class="status" aria-live="polite"></p>
+          </form>
+          <div class="card">
+            <div class="row">
+              <h2>Sessions</h2>
+              <button type="button" id="refresh-sessions" class="ghost">Refresh</button>
+            </div>
+            <ul id="sessions" class="list"></ul>
+          </div>
+        </div>
+        <article id="research-result" class="card result" hidden></article>
+      </section>
+    </main>
+    <script src="/ui/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,51 @@
+[
+  {
+    "id": "retry-file",
+    "mode": "cycle",
+    "question": "which file implements the retry logic",
+    "documents": ["api-errors.md"],
+    "relevant": ["api-errors.md"],
+    "expect_answer": true,
+    "expect_sufficient": true,
+    "expect_gap": false,
+    "expect_conflict": false,
+    "expected_substrings": ["retry.py"]
+  },
+  {
+    "id": "wifi-gap",
+    "mode": "cycle",
+    "question": "what is the office wifi password",
+    "documents": ["api-errors.md"],
+    "relevant": [],
+    "expect_answer": false,
+    "expect_sufficient": false,
+    "expect_gap": true,
+    "gap_terms": ["wifi"],
+    "expect_conflict": false
+  },
+  {
+    "id": "partial-gap",
+    "mode": "cycle",
+    "question": "which file implements the retry logic and what is the office wifi password",
+    "documents": ["api-errors.md"],
+    "relevant": ["api-errors.md"],
+    "expect_answer": true,
+    "expect_sufficient": false,
+    "expect_gap": true,
+    "gap_terms": ["wifi"],
+    "expect_conflict": false,
+    "expected_substrings": ["retry.py"]
+  },
+  {
+    "id": "retry-conflict",
+    "mode": "research",
+    "question": "what is the retry limit",
+    "documents": ["retry-limit-three.md", "retry-limit-five.md"],
+    "relevant": ["retry-limit-three.md", "retry-limit-five.md"],
+    "expect_answer": true,
+    "expect_sufficient": true,
+    "expect_gap": false,
+    "expect_conflict": true,
+    "expected_substrings": ["three", "five"]
+  }
+]

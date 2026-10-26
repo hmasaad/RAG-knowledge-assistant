@@ -1,5 +1,6 @@
 """A traceable graph of claims, passages, documents, versions, and sources."""
 
+import hashlib
 from dataclasses import dataclass, field
 
 from app.ingestion.metadata_store import MetadataStore
@@ -85,6 +86,11 @@ class EvidenceGraph:
                 found.append(node)
         return found
 
+    def clear(self) -> None:
+        self.nodes.clear()
+        self.edges.clear()
+        self._seen.clear()
+
     def claims(self) -> list[GraphNode]:
         return [node for node in self.nodes.values() if node.kind == CLAIM]
 
@@ -115,11 +121,66 @@ class EvidenceGraph:
         }
 
 
+class GraphBoundAdapter:
+    """Record one action's outcome on an evidence graph. The inner adapter does the work."""
+
+    def __init__(self, inner, graph: EvidenceGraph, engine: "ProvenanceEngine") -> None:
+        self.action = inner.action
+        self._inner = inner
+        self._graph = graph
+        self._engine = engine
+
+    def run(self, request, state=None):
+        try:
+            outcome = self._inner.run(request, state)
+        except TypeError:
+            outcome = self._inner.run(request)
+        pool = list(outcome.evidence)
+        if state is not None:
+            seen = {item.evidence_id for item in pool}
+            pool.extend(item for item in state.evidence if item.evidence_id not in seen)
+        self._engine.record_outcome(self._graph, outcome, evidence=pool)
+        return outcome
+
+
 class ProvenanceEngine:
     """Connect claims and evidence to the document versions they came from."""
 
     def __init__(self, metadata: MetadataStore | None = None) -> None:
         self._metadata = metadata
+
+    def record_outcome(self, graph: EvidenceGraph, outcome, *, evidence=()) -> None:
+        """Attach passages and claims from one worker action. Does not search or judge."""
+        by_id = {item.evidence_id: item for item in evidence}
+        by_id.update({item.evidence_id: item for item in getattr(outcome, "evidence", ())})
+        for item in by_id.values():
+            origin = self._origin(
+                item.document_id,
+                item.source,
+                "",
+                chunk_id=item.evidence_id,
+            )
+            passage = GraphNode(
+                id=f"passage:{item.evidence_id}",
+                kind=PASSAGE,
+                label=item.source,
+                provenance=origin,
+            )
+            graph.add_node(passage)
+            self._attach_document(graph, origin)
+        for verdict in getattr(outcome, "verdicts", ()):
+            claim_id = f"claim:{_claim_key(verdict.claim)}"
+            graph.add_node(GraphNode(id=claim_id, kind=CLAIM, label=verdict.claim))
+            relation = CONTRADICTS if verdict.verdict == "contradicted" else SUPPORTS
+            if verdict.verdict not in {"supported", "contradicted"}:
+                continue
+            for evidence_id in verdict.evidence_ids:
+                item = by_id.get(evidence_id)
+                if item is None:
+                    continue
+                graph.add_edge(f"passage:{evidence_id}", relation, claim_id)
+                if item.document_id:
+                    graph.add_edge(claim_id, CITED_IN, f"document:{item.document_id}")
 
     def from_research(
         self,
@@ -266,3 +327,7 @@ class ProvenanceEngine:
             start_char=start_char,
             end_char=end_char,
         )
+
+
+def _claim_key(claim: str) -> str:
+    return hashlib.sha256(claim.strip().encode()).hexdigest()[:12]

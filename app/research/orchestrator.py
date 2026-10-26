@@ -18,6 +18,9 @@ class SearchBudget:
         self.used += 1
         return True
 
+    def remaining(self) -> int:
+        return max(0, self.limit - self.used)
+
 
 def run_search(
     rag: RagClient,

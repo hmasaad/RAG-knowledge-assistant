@@ -165,6 +165,8 @@ class RetrieveResponse(BaseModel):
 class AnswerRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     top_k: int = Field(default=4, ge=1, le=20)
+    halt_after: int | None = Field(default=None, ge=1, le=32)
+    priority: int = Field(default=0, ge=0, le=9)
 
     @field_validator("question")
     @classmethod
@@ -323,5 +325,34 @@ class ResearchResponse(BaseModel):
     links: list[ClaimLinkResponse] = []
     conflicts: list[ConflictResponse] = []
     graph: EvidenceGraphResponse = Field(default_factory=EvidenceGraphResponse)
+    decision: str = "report"
+    decisions: list[str] = []
+    remaining_budget: int = 0
     action: str
     trace_id: str = ""
+    session_id: str = ""
+    status: str = "completed"
+    side_effects: list["SideEffectResponse"] = []
+    quality_action: str = "stop"
+    quality_reason: str = ""
+    quality_failures: list[str] = []
+
+
+class SideEffectResponse(BaseModel):
+    action: str
+    fingerprint: str = ""
+    runs: int = 0
+
+
+class ResearchSessionListItem(BaseModel):
+    session_id: str
+    question: str
+    status: str
+    action: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    priority: int = 0
+
+
+class ResearchSessionListResponse(BaseModel):
+    sessions: list[ResearchSessionListItem]

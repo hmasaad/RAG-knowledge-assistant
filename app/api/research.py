@@ -1,6 +1,6 @@
 """Investigate a question and return a consolidated research report."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 
 from app.api.answer import _citation_response
 from app.api.dependencies import get_services, get_user_id
@@ -13,7 +13,10 @@ from app.api.schemas import (
     GraphEdgeResponse,
     GraphNodeResponse,
     ResearchResponse,
+    ResearchSessionListItem,
+    ResearchSessionListResponse,
     ResearchSubquestionResponse,
+    SideEffectResponse,
 )
 from app.api.search import passage_response
 from app.wiring import Services
@@ -27,7 +30,81 @@ def research(
     services: Services = Depends(get_services),
     user_id: str = Depends(get_user_id),
 ) -> ResearchResponse:
-    result = services.research.research(body.question, body.top_k, user_id=user_id)
+    return _research_response(services.research.research(body.question, body.top_k, user_id=user_id))
+
+
+@router.post("/research/cycle", response_model=ResearchResponse)
+def research_cycle(
+    body: AnswerRequest,
+    response: Response,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> ResearchResponse:
+    result = services.research.cycle(
+        body.question,
+        body.top_k,
+        user_id=user_id,
+        halt_after=body.halt_after,
+        priority=body.priority,
+    )
+    if result.status in {"queued", "running"}:
+        response.status_code = 202
+    return _research_response(result)
+
+
+@router.get("/research/sessions", response_model=ResearchSessionListResponse)
+def list_research_sessions(
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> ResearchSessionListResponse:
+    return ResearchSessionListResponse(
+        sessions=[
+            ResearchSessionListItem(
+                session_id=session.id,
+                question=session.question,
+                status=session.status,
+                action=session.action,
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                priority=session.priority,
+            )
+            for session in services.research.list_sessions(user_id=user_id)
+        ]
+    )
+
+
+@router.get("/research/sessions/{session_id}", response_model=ResearchResponse)
+def get_research_session(
+    session_id: str,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> ResearchResponse:
+    return _research_response(services.research.get_session(session_id, user_id=user_id))
+
+
+@router.post("/research/sessions/{session_id}/resume", response_model=ResearchResponse)
+def resume_research_session(
+    session_id: str,
+    response: Response,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> ResearchResponse:
+    result = services.research.resume(session_id, user_id=user_id)
+    if result.status in {"queued", "running"}:
+        response.status_code = 202
+    return _research_response(result)
+
+
+@router.post("/research/sessions/{session_id}/cancel", response_model=ResearchResponse)
+def cancel_research_session(
+    session_id: str,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> ResearchResponse:
+    return _research_response(services.research.cancel(session_id, user_id=user_id))
+
+
+def _research_response(result) -> ResearchResponse:
     return ResearchResponse(
         question=result.question,
         report=result.report,
@@ -91,8 +168,17 @@ def research(
             for conflict in result.conflicts
         ],
         graph=_graph_response(result.graph),
+        decision=result.decision,
+        decisions=list(result.decisions),
+        remaining_budget=result.remaining_budget,
         action=result.action,
         trace_id=result.trace_id,
+        session_id=result.session_id,
+        status=result.status,
+        side_effects=[SideEffectResponse(**item) for item in result.side_effects],
+        quality_action=result.quality_action,
+        quality_reason=result.quality_reason,
+        quality_failures=list(result.quality_failures),
     )
 
 

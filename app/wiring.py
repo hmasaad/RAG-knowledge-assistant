@@ -17,6 +17,12 @@ from app.observability.tracing import TraceLog
 from app.research.judge import ClaimJudgeAdapter, LazyClaimJudge
 from app.research.rag import KnowledgeRagClient
 from app.research.service import ResearchReport, ResearchService
+from app.research.adapters import compose_action_adapters
+from app.research.graph import EvidenceGraph
+from app.research.guardrails import GuardrailPolicy, ResearchGuardrails, parse_names
+from app.research.observability import ResearchObserver
+from app.research.tools import approved_tools
+from app.research.worker import ResearchWorker
 from app.retrieval.rerank import build_reranker
 from app.retrieval.search import RetrievalResult, SearchService
 from app.storage.blobs import BlobStore, LocalBlobStore
@@ -142,6 +148,18 @@ def build_services(
         default_user_id=settings.default_user_id,
         agent_enabled=settings.agent_enabled,
     )
+    rag_client = KnowledgeRagClient(search, timeout=settings.research_timeout_seconds)
+    tool_registry = approved_tools(rag=rag_client, metadata=metadata)
+    evidence_graph = EvidenceGraph()
+    research_observer = ResearchObserver(metrics)
+    research_guardrails = ResearchGuardrails(
+        GuardrailPolicy(
+            budget=settings.research_search_budget,
+            max_iterations=max(8, settings.research_search_budget),
+            max_cost=settings.research_max_cost,
+            denied_tools=parse_names(settings.research_denied_tools),
+        )
+    )
     research = ResearchService(
         retrieval=search,
         answerer=resolved_answerer,
@@ -150,11 +168,33 @@ def build_services(
         metrics=metrics,
         traces=traces,
         default_user_id=settings.default_user_id,
+        rag=rag_client,
         search_budget=settings.research_search_budget,
         search_timeout=settings.research_timeout_seconds,
+        adapt_rounds=settings.research_adapt_rounds,
+        worker=ResearchWorker(
+            tool_registry,
+            adapters=compose_action_adapters(
+                registry=tool_registry,
+                use_rag=True,
+                use_verification=True,
+                graph=evidence_graph,
+                metadata=metadata,
+            ),
+            budget=settings.research_search_budget,
+            max_iterations=max(8, settings.research_search_budget),
+            graph=evidence_graph,
+            guardrails=research_guardrails,
+            observer=research_observer,
+        ),
+        indexing_mode=settings.indexing_mode,
+        job_timeout_seconds=settings.job_timeout_seconds,
+        worker_concurrency=settings.research_worker_concurrency,
+        user_concurrency=settings.research_user_concurrency,
+        worker_id=f"worker-{id(metrics)}",
     )
     claim_judge = ClaimJudgeAdapter(
-        rag=KnowledgeRagClient(search, timeout=settings.research_timeout_seconds),
+        rag=rag_client,
         judge=LazyClaimJudge(
             provider=settings.llm_provider,
             api_key=settings.openai_api_key,

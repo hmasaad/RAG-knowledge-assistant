@@ -14,7 +14,6 @@ from app.research.verification import (
     passage_contradiction,
     verify_answer,
 )
-from app.ingestion.graph import path_entities
 from app.ingestion.metadata_store import MetadataStore
 from app.observability.cache import LruCache
 from app.observability.logging import log_event
@@ -22,18 +21,26 @@ from app.observability.metrics import Metrics
 from app.observability.tracing import TraceLog
 from app.research.evidence import ClaimLink, EvidenceRecord, EvidenceStore
 from app.research.graph import EvidenceGraph, ProvenanceEngine
-from app.research.orchestrator import SearchBudget, run_search
+from app.research.loop import PROBE_CONFLICT, REPORT, RETRY, STOP, Decision, LoopState, decide
+from app.research.observability import ResearchObserver
+from app.research.quality import evaluate_research
+from app.research.orchestrator import SearchBudget
 from app.research.planner import GRAPH_COMPLETION, KNOWLEDGE_COMPLETION, build_plan
 from app.research.rag import KnowledgeRagClient, RagClient, RagSearchResult, SearchFilters, as_retrieval
+from app.research.tools import ToolContext, approved_tools
+from app.ingestion.errors import KnowledgeError
+from app.research.contracts import ClaimVerdict, EvidenceRef, ResearchState
+from app.research.cycle import CycleCancelled, CycleHalted, CycleResult
+from app.research.jobs import ProductionResearchOrchestrator
+from app.research.sessions import ResearchSession, ResearchSessionStore
+from app.research.state_manager import DurableResearchStateManager
+from app.research.worker import ResearchWorker
 from app.retrieval.search import RankedPassage, SearchService
 from app.security.leakage import answer_leaks
 from app.security.prompts import REFUSAL_TEXT
 
 _MARKER = re.compile(r"\[(\d+)\]")
 _QUOTE_LIMIT = 500
-_GRAPH_LIMIT = 4
-
-
 @dataclass(frozen=True)
 class ResearchStep:
     question: str
@@ -63,6 +70,15 @@ class ResearchReport:
     links: tuple[ClaimLink, ...] = ()
     conflicts: tuple[Contradiction, ...] = ()
     graph: EvidenceGraph | None = None
+    decision: str = "report"
+    decisions: tuple[str, ...] = ()
+    remaining_budget: int = 0
+    session_id: str = ""
+    status: str = "completed"
+    side_effects: tuple[dict, ...] = ()
+    quality_action: str = "stop"
+    quality_reason: str = ""
+    quality_failures: tuple[str, ...] = ()
 
 
 class _EvidenceBoard:
@@ -128,16 +144,48 @@ class ResearchService:
         rag: RagClient | None = None,
         search_budget: int = 16,
         search_timeout: float | None = None,
+        adapt_rounds: int = 2,
+        worker: ResearchWorker | None = None,
+        indexing_mode: str = "inline",
+        job_timeout_seconds: float = 900,
+        sessions: ResearchSessionStore | None = None,
+        worker_concurrency: int = 2,
+        user_concurrency: int = 2,
+        worker_id: str = "worker",
     ) -> None:
         self._retrieval = retrieval
         self._answerer = answerer
         self._metadata = metadata
         self._cache = cache
         self._metrics = metrics
+        self._observer = ResearchObserver(metrics)
         self._traces = traces if traces is not None else TraceLog()
         self._default_user_id = default_user_id
         self._rag = rag if rag is not None else KnowledgeRagClient(retrieval, timeout=search_timeout)
         self._budget_limit = search_budget
+        self._adapt_rounds = adapt_rounds
+        self._worker = worker if worker is not None else ResearchWorker(
+            approved_tools(rag=self._rag, metadata=metadata),
+            budget=search_budget,
+            max_iterations=max(8, search_budget),
+            observer=self._observer,
+        )
+        self._worker.observer = self._observer
+        self._worker._dispatcher.observer = self._observer
+        self._indexing_mode = indexing_mode
+        self._job_timeout_seconds = job_timeout_seconds
+        self._sessions = sessions if sessions is not None else ResearchSessionStore(metadata.path)
+        self._state = DurableResearchStateManager(
+            self._sessions,
+            lease_seconds=job_timeout_seconds,
+        )
+        self._jobs = ProductionResearchOrchestrator(
+            self._state,
+            self._run_session,
+            concurrency=worker_concurrency,
+            user_concurrency=user_concurrency,
+            worker_id=worker_id,
+        )
 
     def research(
         self,
@@ -223,6 +271,21 @@ class ResearchService:
                 store=store,
             )
 
+        decisions = self._adapt(
+            top_k=top_k,
+            caller=caller,
+            trace_id=trace_id,
+            board=board,
+            steps=steps,
+            contradictions=contradictions,
+            conflicts=conflicts,
+            gaps=gaps,
+            evidence=evidence,
+            searched=searched,
+            budget=budget,
+            store=store,
+        )
+        last = decisions[-1] if decisions else Decision(REPORT, "Evidence is sufficient.")
         verified = [step for step in steps if step.status in {"supported", "contradicted"}]
         action = "research" if verified or contradictions or catalog else "refuse"
         report_text = _render(evidence, contradictions, gaps, catalog, refused=not verified)
@@ -244,8 +307,12 @@ class ResearchService:
             links=tuple(store.links),
             conflicts=tuple(conflicts),
             graph=ProvenanceEngine(self._metadata).from_research(store.records, conflicts),
+            decision=last.action,
+            decisions=tuple(item.action for item in decisions),
+            remaining_budget=budget.remaining(),
         )
         report = self._block_leaks(report, caller, trace_id)
+        _attach_quality(report)
         self._traces.step(
             trace_id,
             action=report.action,
@@ -335,10 +402,16 @@ class ResearchService:
         tool: str,
         budget: SearchBudget,
     ) -> tuple[RagSearchResult | None, str]:
-        filters = SearchFilters(user_id=caller)
-        found, error = run_search(self._rag, budget, question, filters, top_k)
-        if error == "Search budget exhausted.":
-            return None, error
+        context = ToolContext(
+            user_id=caller,
+            top_k=top_k,
+            filters=SearchFilters(user_id=caller),
+            budget=budget,
+        )
+        first = self._worker.execute("knowledge", question, context)
+        if first.error == "Search budget exhausted.":
+            return None, first.error
+        found = first.search
         self._traces.step(
             trace_id,
             action="search",
@@ -347,16 +420,17 @@ class ResearchService:
             sufficient_evidence=bool(found and found.sufficient_evidence),
             hit_count=0 if found is None else len(found.passages),
         )
-        if error or found is None:
-            return None, error
+        if not first.ok or found is None:
+            return None, first.error
         if found.sufficient_evidence or not found.passages:
             return found, ""
         alternative = reformulate(question)
         if alternative is None:
             return found, ""
-        retried, retry_error = run_search(self._rag, budget, alternative, filters, top_k)
-        if retry_error == "Search budget exhausted.":
+        retried_call = self._worker.execute("knowledge", alternative, context)
+        if retried_call.error == "Search budget exhausted.":
             return found, ""
+        retried = retried_call.search
         self._traces.step(
             trace_id,
             action="retry",
@@ -365,6 +439,7 @@ class ResearchService:
             sufficient_evidence=bool(retried and retried.sufficient_evidence),
             hit_count=0 if retried is None else len(retried.passages),
         )
+        self._observer.record_retry("search")
         if retried is not None and retried.sufficient_evidence:
             return retried, ""
         return found, ""
@@ -372,11 +447,12 @@ class ResearchService:
     def _catalog(self, caller: str, tools: tuple[str, ...], trace_id: str) -> tuple[str, ...]:
         if "catalog" not in tools:
             return ()
-        names = tuple(
-            record.filename
-            for record in self._metadata.list_visible(caller)
-            if record.indexed_version >= 1
+        result = self._worker.execute(
+            "catalog",
+            "",
+            ToolContext(user_id=caller),
         )
+        names = result.names
         self._traces.step(
             trace_id,
             action="catalog",
@@ -403,13 +479,15 @@ class ResearchService:
         budget: SearchBudget,
         store: EvidenceStore,
     ) -> None:
-        names = path_entities(question)
-        visible = set(self._metadata.readable_versions(caller))
-        neighbors = [
-            name
-            for name in self._metadata.neighbors(names, visible)[:_GRAPH_LIMIT]
-            if name.casefold() not in searched
-        ]
+        result = self._worker.execute(
+            "graph",
+            question,
+            ToolContext(
+                user_id=caller,
+                document_ids=set(self._metadata.readable_versions(caller)),
+            ),
+        )
+        neighbors = [name for name in result.names if name.casefold() not in searched]
         self._traces.step(
             trace_id,
             action="graph",
@@ -437,6 +515,88 @@ class ResearchService:
                 )
             )
 
+    def _adapt(
+        self,
+        *,
+        top_k: int,
+        caller: str,
+        trace_id: str,
+        board: _EvidenceBoard,
+        steps: list[ResearchStep],
+        contradictions: list[str],
+        conflicts: list[Contradiction],
+        gaps: list[str],
+        evidence: list[str],
+        searched: set[str],
+        budget: SearchBudget,
+        store: EvidenceStore,
+    ) -> list[Decision]:
+        decisions: list[Decision] = []
+        gap_retries = 0
+        conflict_probes = 0
+        while True:
+            quality_action, quality_reason, _failures = _quality_feedback(
+                board,
+                evidence,
+                contradictions,
+                gaps,
+                steps,
+            )
+            state = _loop_state(
+                steps,
+                gaps,
+                conflicts,
+                store,
+                budget,
+                gap_retries=gap_retries,
+                conflict_probes=conflict_probes,
+                max_adapts=self._adapt_rounds,
+                quality_action=quality_action,
+                quality_reason=quality_reason,
+            )
+            choice = decide(state)
+            decisions.append(choice)
+            self._traces.step(
+                trace_id,
+                action="decide",
+                query=choice.query or choice.action,
+                tool=choice.action,
+                sufficient_evidence=state.complete and not state.gaps,
+                hit_count=budget.remaining(),
+            )
+            if choice.action in {REPORT, STOP} or not choice.query:
+                break
+            if choice.query.casefold() in searched:
+                break
+            searched.add(choice.query.casefold())
+            step = self._investigate(
+                choice.query,
+                tool="knowledge",
+                completion=KNOWLEDGE_COMPLETION,
+                top_k=top_k,
+                caller=caller,
+                trace_id=trace_id,
+                board=board,
+                contradictions=contradictions,
+                conflicts=conflicts,
+                gaps=gaps,
+                evidence=evidence,
+                budget=budget,
+                store=store,
+            )
+            if choice.action == RETRY:
+                gap_retries += 1
+                self._observer.record_retry("gap")
+                _replace_gap(steps, gaps, step)
+            else:
+                conflict_probes += 1
+                self._observer.record_retry("conflict")
+                if step.complete:
+                    steps.append(step)
+                else:
+                    _drop_gap(gaps, step.question)
+        return decisions
+
     def _block_leaks(self, report: ResearchReport, caller: str, trace_id: str) -> ResearchReport:
         hidden = self._retrieval.hidden_sensitive_tokens(caller)
         if not answer_leaks(report.report, hidden):
@@ -451,10 +611,239 @@ class ResearchService:
         report.links = ()
         report.conflicts = ()
         report.graph = EvidenceGraph()
+        report.decision = "stop"
+        report.decisions = ()
         return report
+
+    def cycle(
+        self,
+        question: str,
+        top_k: int = 4,
+        *,
+        user_id: str | None = None,
+        halt_after: int | None = None,
+        priority: int = 0,
+    ) -> ResearchReport:
+        return self.submit_cycle(
+            question,
+            top_k,
+            user_id=user_id,
+            halt_after=halt_after,
+            priority=priority,
+        )
+
+    def submit_cycle(
+        self,
+        question: str,
+        top_k: int = 4,
+        *,
+        user_id: str | None = None,
+        halt_after: int | None = None,
+        priority: int = 0,
+    ) -> ResearchReport:
+        caller = user_id or self._default_user_id
+        asked = question.strip()
+        self._metrics.inc("rag_research_cycle_requests_total")
+        started = time.perf_counter()
+        trace_id = self._traces.start(user_id=caller, question=asked)
+        session = self._sessions.create(
+            user_id=caller,
+            question=asked,
+            top_k=top_k,
+            trace_id=trace_id,
+            priority=priority,
+        )
+        if needs_clarification(asked):
+            report = _empty_report(asked, CLARIFICATION_TEXT, action="clarify", trace_id=trace_id)
+            report.session_id = session.id
+            report.status = "completed"
+            self._state.complete(
+                session.id,
+                {
+                    "action": "clarify",
+                    "report": CLARIFICATION_TEXT,
+                    "sufficient_evidence": False,
+                    "steps": ["clarify"],
+                    "gaps": [],
+                    "contradictions": [],
+                    "cost": 0,
+                    "verdicts": [],
+                    "evidence": [],
+                },
+                ResearchState(),
+            )
+            self._traces.step(trace_id, action="clarify")
+            self._finish(("research_cycle", session.id), caller, report, started)
+            return report
+        if self._indexing_mode == "inline":
+            return self._run_session(session.id, started=started, halt_after=halt_after)
+        return self._with_effects(_pending_report(session), session.id)
+
+    def get_session(self, session_id: str, *, user_id: str | None = None) -> ResearchReport:
+        session = self._owned_session(session_id, user_id)
+        return self._report_from_session(session)
+
+    def list_sessions(self, *, user_id: str | None = None) -> list[ResearchSession]:
+        caller = user_id or self._default_user_id
+        return self._sessions.list_for_user(caller)
+
+    def resume(self, session_id: str, *, user_id: str | None = None) -> ResearchReport:
+        session = self._owned_session(session_id, user_id)
+        if session.status == "completed":
+            return self._report_from_session(session)
+        self._state.requeue(session.id)
+        if self._indexing_mode == "inline":
+            return self._run_session(session.id)
+        stored = self._sessions.get(session.id)
+        pending = _pending_report(stored if stored is not None else session)
+        return self._with_effects(pending, session.id)
+
+    def job_counts(self) -> dict[str, int]:
+        return self._state.job_counts()
+
+    def cancel(self, session_id: str, *, user_id: str | None = None) -> ResearchReport:
+        session = self._owned_session(session_id, user_id)
+        if session.status == "completed":
+            return self._report_from_session(session)
+        stored = self._state.cancel(session.id)
+        return self._report_from_session(stored if stored is not None else session)
+
+    def process_next_job(self) -> bool:
+        """Run one queued research cycle. Returns False when the queue is empty."""
+        return self._jobs.process_next()
+
+    def process_available(self) -> int:
+        """Claim and run up to the worker concurrency limit."""
+        return self._jobs.process_available()
+
+    def _owned_session(self, session_id: str, user_id: str | None) -> ResearchSession:
+        caller = user_id or self._default_user_id
+        session = self._sessions.get(session_id)
+        if session is None or session.user_id != caller:
+            raise KnowledgeError("Research session not found.", status_code=404)
+        return session
+
+    def _run_session(
+        self,
+        session_id: str,
+        *,
+        started: float | None = None,
+        claimed: bool = False,
+        halt_after: int | None = None,
+    ) -> ResearchReport:
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise KnowledgeError("Research session not found.", status_code=404)
+        clock = started if started is not None else time.perf_counter()
+        if not claimed:
+            self._state.acquire(session.id)
+        state = self._state.restore(session.id)
+        try:
+            result = self._worker.cycle(
+                session.question,
+                user_id=session.user_id,
+                top_k=session.top_k,
+                state=state,
+                on_progress=lambda progress, request=None, outcome=None: (
+                    self._state.checkpoint(session.id, progress, request, outcome),
+                    self._state.heartbeat(session.id),
+                ),
+                halt_after=halt_after,
+                should_cancel=lambda: self._sessions.cancel_requested(session.id),
+            )
+        except CycleCancelled as cancelled:
+            self._state.finish_cancelled(session.id, _result_payload(cancelled.result), state)
+            report = _cycle_report(
+                session.question,
+                cancelled.result,
+                trace_id=session.trace_id,
+                budget=self._budget_limit,
+            )
+            report.session_id = session.id
+            report.status = "cancelled"
+            report.decision = "stop"
+            self._observer.record_request(
+                "cycle",
+                seconds=time.perf_counter() - clock,
+                cost=max(0, self._budget_limit - report.remaining_budget),
+                status="cancelled",
+            )
+            return self._with_effects(report, session.id)
+        except CycleHalted as halted:
+            self._state.halt(session.id, _result_payload(halted.result), state)
+            report = _cycle_report(
+                session.question,
+                halted.result,
+                trace_id=session.trace_id,
+                budget=self._budget_limit,
+            )
+            report.session_id = session.id
+            report.status = "halted"
+            report.decision = "stop"
+            self._observer.record_request(
+                "cycle",
+                seconds=time.perf_counter() - clock,
+                cost=max(0, self._budget_limit - report.remaining_budget),
+                status="halted",
+            )
+            return self._with_effects(report, session.id)
+        except Exception as exc:
+            self._observer.record_action(
+                "cycle",
+                ok=False,
+                seconds=time.perf_counter() - clock,
+                error=str(exc) or type(exc).__name__,
+            )
+            self._state.fail(session.id, str(exc) or type(exc).__name__, state)
+            raise
+        for step in result.steps:
+            self._traces.step(session.trace_id, action=step, query=session.question, tool=step)
+        report = _cycle_report(
+            session.question,
+            result,
+            trace_id=session.trace_id,
+            budget=self._budget_limit,
+        )
+        report.session_id = session.id
+        report.status = "completed"
+        self._state.complete(session.id, _result_payload(result), state)
+        self._traces.step(session.trace_id, action=report.action)
+        self._finish(("research_cycle", session.id), session.user_id, report, clock)
+        return self._with_effects(report, session.id)
+
+    def _with_effects(self, report: ResearchReport, session_id: str) -> ResearchReport:
+        report.side_effects = tuple(self._state.side_effects(session_id))
+        return report
+
+    def _report_from_session(self, session: ResearchSession) -> ResearchReport:
+        if session.status in {"completed", "halted", "cancelled"} and session.result:
+            result = _cycle_result(session)
+            report = _cycle_report(
+                session.question,
+                result,
+                trace_id=session.trace_id,
+                budget=self._budget_limit,
+            )
+            report.session_id = session.id
+            report.status = session.status
+            if session.action == "clarify":
+                report.action = "clarify"
+                report.report = session.report
+            if session.status in {"halted", "cancelled"}:
+                report.decision = "stop"
+            return self._with_effects(report, session.id)
+        return self._with_effects(_pending_report(session), session.id)
 
     def _finish(self, key, caller: str, report: ResearchReport, started: float) -> None:
         self._cache.put(key, report)
+        path = "cycle" if isinstance(key, tuple) and key[0] == "research_cycle" else "research"
+        elapsed = time.perf_counter() - started
+        self._observer.record_request(
+            path,
+            seconds=elapsed,
+            cost=max(0, self._budget_limit - report.remaining_budget),
+            status=report.status or report.action,
+        )
         log_event(
             "rag.research",
             "research_completed",
@@ -464,9 +853,98 @@ class ResearchService:
             conflict=report.conflict,
             citation_count=len(report.citations),
             gap_count=len(report.gaps),
-            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            duration_ms=round(elapsed * 1000, 2),
             trace_id=report.trace_id,
         )
+
+
+def _quality_feedback(
+    board: _EvidenceBoard,
+    evidence: list[str],
+    contradictions: list[str],
+    gaps: list[str],
+    steps: list[ResearchStep],
+) -> tuple[str, str, tuple[str, ...]]:
+    verified = [step for step in steps if step.status in {"supported", "contradicted"}]
+    snapshot = ResearchReport(
+        question="",
+        report=_render(evidence, contradictions, gaps, (), refused=not verified),
+        sufficient_evidence=bool(verified) and not gaps,
+        conflict=bool(contradictions),
+        tools=(),
+        subquestions=(),
+        contradictions=tuple(contradictions),
+        gaps=tuple(gaps),
+        catalog=(),
+        citations=board.citations(),
+        passages=[],
+        action="research",
+        status="running",
+    )
+    score = evaluate_research(snapshot)
+    return score.recommendation, score.recommendation_reason, score.failures
+
+
+def _attach_quality(report: ResearchReport) -> ResearchReport:
+    score = evaluate_research(report)
+    report.quality_action = score.recommendation
+    report.quality_reason = score.recommendation_reason
+    report.quality_failures = score.failures
+    return report
+
+
+def _loop_state(
+    steps: list[ResearchStep],
+    gaps: list[str],
+    conflicts: list[Contradiction],
+    store: EvidenceStore,
+    budget: SearchBudget,
+    *,
+    gap_retries: int,
+    conflict_probes: int,
+    max_adapts: int,
+    quality_action: str = "",
+    quality_reason: str = "",
+) -> LoopState:
+    verified = [step for step in steps if step.status in {"supported", "contradicted"}]
+    files = {record.source.filename for record in store.records}
+    unresolved = tuple(item.summary for item in conflicts if len(files) < 2)
+    return LoopState(
+        complete=bool(verified) and not gaps,
+        supported=len(verified),
+        gaps=tuple(gaps),
+        unresolved_conflicts=unresolved,
+        remaining_budget=budget.remaining(),
+        gap_retries=gap_retries,
+        conflict_probes=conflict_probes,
+        max_adapts=max_adapts,
+        quality_action=quality_action,
+        quality_reason=quality_reason,
+    )
+
+
+def _replace_gap(steps: list[ResearchStep], gaps: list[str], step: ResearchStep) -> None:
+    if not step.complete:
+        _drop_gap(gaps, step.question)
+        return
+    for index, existing in enumerate(steps):
+        alternative = reformulate(existing.question)
+        if existing.status == "gap" and (
+            existing.question.casefold() == step.question.casefold()
+            or alternative == step.question
+        ):
+            steps[index] = step
+            _drop_gap(gaps, existing.question)
+            _drop_gap(gaps, step.question)
+            return
+    steps.append(step)
+    _drop_gap(gaps, step.question)
+
+
+def _drop_gap(gaps: list[str], question: str) -> None:
+    key = question.casefold()
+    keep = [gap for gap in gaps if gap.casefold() != key]
+    gaps[:] = keep
 
 
 def _record_supported(
@@ -512,6 +990,137 @@ def _render(
     if gaps:
         lines.append("Evidence gaps: " + "; ".join(gaps) + ".")
     return "\n".join(lines)
+
+
+def _pending_report(session: ResearchSession) -> ResearchReport:
+    report = _empty_report(session.question, session.report, action=session.action, trace_id=session.trace_id)
+    report.session_id = session.id
+    report.status = session.status
+    report.gaps = session.gaps
+    report.contradictions = session.contradictions
+    report.decisions = session.steps
+    report.subquestions = tuple(
+        ResearchStep(question=session.question, tool=name, status="ok", evidence="", complete=False)
+        for name in session.steps
+    )
+    return report
+
+
+def _result_payload(result: CycleResult) -> dict:
+    return {
+        "action": result.action,
+        "report": result.report,
+        "sufficient_evidence": result.sufficient_evidence,
+        "steps": list(result.steps),
+        "gaps": list(result.gaps),
+        "contradictions": list(result.contradictions),
+        "cost": result.cost,
+        "verdicts": [
+            {"claim": item.claim, "verdict": item.verdict, "evidence_ids": list(item.evidence_ids)}
+            for item in result.verdicts
+        ],
+        "evidence": [
+            {
+                "evidence_id": item.evidence_id,
+                "document_id": item.document_id,
+                "source": item.source,
+                "text": item.text,
+            }
+            for item in result.evidence
+        ],
+    }
+
+
+def _cycle_result(session: ResearchSession) -> CycleResult:
+    payload = session.result or {}
+    state = session.state or ResearchState()
+    verdicts = tuple(
+        ClaimVerdict(
+            claim=str(item.get("claim", "")),
+            verdict=str(item.get("verdict", "")),
+            evidence_ids=tuple(str(value) for value in item.get("evidence_ids", ())),
+        )
+        for item in payload.get("verdicts", [])
+    ) or tuple(state.verdicts)
+    evidence = tuple(
+        EvidenceRef(
+            evidence_id=str(item.get("evidence_id", "")),
+            document_id=str(item.get("document_id", "")),
+            source=str(item.get("source", "")),
+            text=str(item.get("text", "")),
+        )
+        for item in payload.get("evidence", [])
+    ) or tuple(state.evidence)
+    return CycleResult(
+        question=session.question,
+        report=str(payload.get("report", session.report)),
+        sufficient_evidence=bool(payload.get("sufficient_evidence", session.sufficient_evidence)),
+        steps=tuple(payload.get("steps", session.steps)),
+        gaps=tuple(payload.get("gaps", session.gaps)),
+        verdicts=verdicts,
+        evidence=evidence,
+        contradictions=tuple(payload.get("contradictions", session.contradictions)),
+        cost=int(payload.get("cost", session.cost) or 0),
+        action=str(payload.get("action", session.action)),
+    )
+
+
+def _cycle_report(
+    question: str,
+    result: CycleResult,
+    *,
+    trace_id: str,
+    budget: int,
+) -> ResearchReport:
+    citations: list[Citation] = []
+    seen: set[str] = set()
+    by_id = {item.evidence_id: item for item in result.evidence}
+    for verdict in result.verdicts:
+        if verdict.verdict != "supported":
+            continue
+        for evidence_id in verdict.evidence_ids:
+            if evidence_id in seen:
+                continue
+            passage = by_id.get(evidence_id)
+            if passage is None:
+                continue
+            seen.add(evidence_id)
+            citations.append(
+                Citation(
+                    marker=f"[{len(citations) + 1}]",
+                    chunk_id=passage.evidence_id,
+                    document_id=passage.document_id,
+                    filename=passage.source,
+                    content_type="text/markdown",
+                    heading=None,
+                    page=None,
+                    quote=_quote(passage.text),
+                )
+            )
+    steps = tuple(
+        ResearchStep(question=question, tool=name, status="ok", evidence="", complete=True)
+        for name in result.steps
+    )
+    return ResearchReport(
+        question=question,
+        report=result.report,
+        sufficient_evidence=result.sufficient_evidence,
+        conflict=bool(result.contradictions),
+        tools=("knowledge",),
+        subquestions=steps,
+        contradictions=result.contradictions,
+        gaps=result.gaps,
+        catalog=(),
+        citations=citations,
+        passages=[],
+        action=result.action,
+        trace_id=trace_id,
+        decision="report" if result.sufficient_evidence else "stop",
+        decisions=result.steps,
+        remaining_budget=max(0, budget - result.cost),
+        graph=result.graph if getattr(result, "graph", None) is not None else None,
+    )
+    return _attach_quality(report)
 
 
 def _empty_report(question: str, text: str, *, action: str, trace_id: str) -> ResearchReport:

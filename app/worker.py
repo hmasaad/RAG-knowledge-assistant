@@ -18,11 +18,13 @@ from app.wiring import Services, build_services
 
 
 def process_forever(services: Services, stop: threading.Event) -> None:
-    """Index queued documents until ``stop`` is set."""
+    """Index queued documents and run queued research cycles until ``stop`` is set."""
     poll = services.settings.worker_poll_seconds
     while not stop.is_set():
         try:
-            worked = services.ingestion.process_next_job()
+            indexed = services.ingestion.process_next_job()
+            researched = services.research.process_available()
+            worked = indexed or researched > 0
         except Exception as exc:
             log_event("rag.worker", "worker_error", error=type(exc).__name__)
             worked = False

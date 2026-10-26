@@ -19,6 +19,7 @@ from app.generation.answerers import Answerer
 from app.ingestion.embeddings import Embedder
 from app.ingestion.errors import KnowledgeError
 from app.observability.logging import configure_logging
+from app.web.routes import mount_ui
 from app.wiring import Services, build_services
 
 health_router = APIRouter(tags=["health"])
@@ -28,6 +29,7 @@ health_router = APIRouter(tags=["health"])
 def health(request: Request) -> dict[str, object]:
     services: Services = request.app.state.services
     jobs = services.metadata.job_counts()
+    research_jobs = services.research.job_counts()
     return {
         "status": "ok",
         "documents": len(services.ingestion.list_documents()),
@@ -37,6 +39,8 @@ def health(request: Request) -> dict[str, object]:
         "indexing_mode": services.settings.indexing_mode,
         "jobs_queued": jobs.get("queued", 0),
         "jobs_running": jobs.get("running", 0),
+        "research_jobs_queued": research_jobs.get("queued", 0),
+        "research_jobs_running": research_jobs.get("running", 0),
         "catalog_generation": services.metadata.generation(),
     }
 
@@ -65,6 +69,8 @@ def metrics(request: Request) -> PlainTextResponse:
         services.metrics.set_gauge("rag_documents", float(count), status=status)
     for status, count in services.metadata.job_counts().items():
         services.metrics.set_gauge("rag_jobs", float(count), status=status)
+    for status, count in services.research.job_counts().items():
+        services.metrics.set_gauge("rag_research_jobs", float(count), status=status)
     return PlainTextResponse(
         services.metrics.render(),
         media_type="text/plain; version=0.0.4; charset=utf-8",
@@ -111,6 +117,7 @@ def create_app(
     application.include_router(claims_router, prefix="/api")
     application.include_router(research_router, prefix="/api")
     application.include_router(operations_router, prefix="/api")
+    mount_ui(application)
     return application
 
 

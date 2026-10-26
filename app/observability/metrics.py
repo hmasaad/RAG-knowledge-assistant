@@ -33,6 +33,11 @@ class Metrics:
         with self._lock:
             return self._counters.get(key, 0.0)
 
+    def summary(self, name: str, **labels: str) -> tuple[float, int]:
+        key = _key(name, labels)
+        with self._lock:
+            return self._observations.get(key, (0.0, 0))
+
     def set_gauge(self, name: str, value: float, **labels: str) -> None:
         key = _key(name, labels)
         with self._lock:

@@ -1,0 +1,8 @@
+{
+  "pass_rate": 1.0,
+  "reliability": 1.0,
+  "known_answer": 1.0,
+  "claim_accuracy": 1.0,
+  "contradiction_accuracy": 1.0,
+  "search_contract": 1.0
+}

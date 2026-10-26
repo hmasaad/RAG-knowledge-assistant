@@ -1,0 +1,10 @@
+{
+  "faithfulness": 1.0,
+  "citation_correctness": 1.0,
+  "sufficiency": 1.0,
+  "gap_detection": 1.0,
+  "conflict_detection": 1.0,
+  "coverage": 1.0,
+  "source_recall": 1.0,
+  "reliability": 1.0
+}
