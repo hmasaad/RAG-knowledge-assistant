@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 
-from app.api.dependencies import get_services
+from app.api.dependencies import get_services, get_user_id
 from app.engineering.contracts import EvaluationReport
 from app.ingestion.errors import KnowledgeError
 from app.wiring import Services
@@ -89,6 +89,69 @@ class CompareResponse(BaseModel):
     detail: str
 
 
+class LoopRecordRequest(BaseModel):
+    planner_version: str
+    metrics: dict[str, float]
+    promote: bool = False
+
+
+class LoopSnapshotResponse(BaseModel):
+    planner_version: str
+    metrics: dict[str, float]
+    allowed: bool
+    regressions: list[str] = []
+    promoted: bool = False
+    recorded_at: str = ""
+
+
+class LoopStateResponse(BaseModel):
+    baseline: LoopSnapshotResponse | None = None
+    history: list[LoopSnapshotResponse] = []
+
+
+class ReadinessCheckResponse(BaseModel):
+    name: str
+    passed: bool
+    detail: str = ""
+
+
+class ReadinessResponse(BaseModel):
+    ready: bool
+    production_ready: bool
+    serving: str = ""
+    hold: bool = False
+    checks: list[ReadinessCheckResponse]
+
+
+class ReleaseRequest(BaseModel):
+    planner_version: str
+    metrics: dict[str, float]
+
+
+class ReleaseResponse(BaseModel):
+    allowed: bool
+    ready: bool
+    promoted: bool
+    planner_version: str
+    actor: str
+    checks: list[ReadinessCheckResponse]
+    regressions: list[str] = []
+    detail: str = ""
+    audit_id: str = ""
+    serving: str = ""
+
+
+class AuditEventResponse(BaseModel):
+    id: str
+    action: str
+    planner_version: str
+    actor: str
+    allowed: bool
+    detail: str
+    recorded_at: str
+    metrics: dict[str, float] = {}
+
+
 @router.get("/engineering/dashboard", response_model=DashboardResponse)
 def read_dashboard(services: Services = Depends(get_services)) -> DashboardResponse:
     board = services.engineering.dashboard()
@@ -162,6 +225,70 @@ def compare_evaluations(
         allowed=decision.allowed,
         regressions=list(decision.regressions),
         detail=decision.detail,
+    )
+
+
+@router.get("/engineering/loop", response_model=LoopStateResponse)
+def read_loop(services: Services = Depends(get_services)) -> LoopStateResponse:
+    return _loop_state(services.engineering.loop_state())
+
+
+@router.post("/engineering/loop", response_model=LoopSnapshotResponse)
+def record_loop(
+    body: LoopRecordRequest,
+    services: Services = Depends(get_services),
+) -> LoopSnapshotResponse:
+    snapshot = services.engineering.record_loop(
+        body.planner_version,
+        body.metrics,
+        promote=body.promote,
+    )
+    return LoopSnapshotResponse(**snapshot.to_payload())
+
+
+@router.post("/engineering/loop/promote", response_model=LoopSnapshotResponse)
+def promote_loop(
+    body: LoopRecordRequest,
+    services: Services = Depends(get_services),
+) -> LoopSnapshotResponse:
+    snapshot = services.engineering.promote_loop(body.planner_version, body.metrics)
+    return LoopSnapshotResponse(**snapshot.to_payload())
+
+
+@router.get("/engineering/readiness", response_model=ReadinessResponse)
+def read_readiness(services: Services = Depends(get_services)) -> ReadinessResponse:
+    return ReadinessResponse(**services.engineering.readiness().to_payload())
+
+
+@router.post("/engineering/release", response_model=ReleaseResponse)
+def release_planner(
+    body: ReleaseRequest,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> ReleaseResponse:
+    decision = services.engineering.release(body.planner_version, body.metrics, actor=user_id)
+    return ReleaseResponse(**decision.to_payload())
+
+
+@router.post("/engineering/rollback", response_model=ReleaseResponse)
+def rollback_planner(
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> ReleaseResponse:
+    decision = services.engineering.rollback(actor=user_id)
+    return ReleaseResponse(**decision.to_payload())
+
+
+@router.get("/engineering/audit", response_model=list[AuditEventResponse])
+def read_audit(services: Services = Depends(get_services)) -> list[AuditEventResponse]:
+    return [AuditEventResponse(**item.to_payload()) for item in services.engineering.audit()]
+
+
+def _loop_state(state) -> LoopStateResponse:
+    baseline = LoopSnapshotResponse(**state.baseline.to_payload()) if state.baseline is not None else None
+    return LoopStateResponse(
+        baseline=baseline,
+        history=[LoopSnapshotResponse(**item.to_payload()) for item in state.history],
     )
 
 

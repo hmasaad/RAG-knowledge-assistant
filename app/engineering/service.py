@@ -11,6 +11,14 @@ from app.engineering.contracts import (
 )
 from app.engineering.dashboard import Dashboard, build_dashboard
 from app.engineering.improve import ImprovementDecision, compare_reports
+from app.engineering.governance import (
+    GovernanceDecision,
+    GovernancePolicy,
+    ProductionGovernance,
+    ReadinessProbes,
+    ReadinessReport,
+)
+from app.engineering.loop import ContinuousImprovementLoop, LoopSnapshot, LoopState, compare_metrics
 from app.engineering.recovery import analyze_recovery
 from app.engineering.trajectory import (
     ERROR,
@@ -25,10 +33,19 @@ from app.engineering.trajectory import (
 class EngineeringService:
     """One facade for trajectories, evaluation contracts, and the dashboard."""
 
-    def __init__(self, path: Path | None = None, *, retry_budget: int = 2) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        retry_budget: int = 2,
+        policy: GovernancePolicy | None = None,
+        probes: ReadinessProbes | None = None,
+    ) -> None:
         self.recorder = TrajectoryRecorder(path)
         self.retry_budget = retry_budget
         self._reports: dict[str, EvaluationReport] = {}
+        self.loop = ContinuousImprovementLoop(path)
+        self.governance = ProductionGovernance(path, self.loop, policy=policy, probes=probes)
 
     def start_run(self, **fields) -> str:
         return self.recorder.start(**fields)
@@ -77,6 +94,7 @@ class EngineeringService:
         quality_confident: bool | None = None,
         sufficient: bool | None = None,
         leaked: bool = False,
+        budget_ok: bool | None = None,
     ) -> EvaluationReport:
         run = self.recorder.get(run_id)
         status = workflow_state or (run.status if run is not None else "unknown")
@@ -123,6 +141,7 @@ class EngineeringService:
                 dimension("correctness", correctness),
                 dimension("safety", safety, detail="leak or policy" if safety < 1 else ""),
                 dimension("recovery", recovery_score, passed=not recovery.terminal),
+                dimension("budget", 1.0 if budget_ok is not False else 0.0),
             ),
             findings=tuple(findings),
             evidence_refs=tuple(evidence),
@@ -146,3 +165,27 @@ class EngineeringService:
 
     def compare(self, baseline: EvaluationReport, candidate: EvaluationReport) -> ImprovementDecision:
         return compare_reports(baseline, candidate)
+
+    def record_loop(self, planner_version: str, metrics: dict[str, float], *, promote: bool = False) -> LoopSnapshot:
+        return self.loop.record(planner_version, metrics, promote=promote)
+
+    def promote_loop(self, planner_version: str, metrics: dict[str, float]) -> LoopSnapshot:
+        return self.loop.promote(planner_version, metrics)
+
+    def loop_state(self) -> LoopState:
+        return self.loop.state()
+
+    def compare_loop(self, baseline: dict[str, float], candidate: dict[str, float]) -> ImprovementDecision:
+        return compare_metrics(baseline, candidate)
+
+    def readiness(self, metrics: dict[str, float] | None = None) -> ReadinessReport:
+        return self.governance.readiness(metrics)
+
+    def release(self, planner_version: str, metrics: dict[str, float], *, actor: str) -> GovernanceDecision:
+        return self.governance.release(planner_version, metrics, actor=actor)
+
+    def rollback(self, *, actor: str) -> GovernanceDecision:
+        return self.governance.rollback(actor=actor)
+
+    def audit(self):
+        return self.governance.audit()

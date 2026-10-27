@@ -1,0 +1,7 @@
+{
+  "pass_rate": 1.0,
+  "correctness": 1.0,
+  "safety": 1.0,
+  "budget": 1.0,
+  "recovery": 1.0
+}

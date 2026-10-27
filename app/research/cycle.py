@@ -3,9 +3,10 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from app.generation.agent import reformulate
 from app.research.adapters import cited_answer
 from app.research.contracts import (
+    FILL_GAPS,
+    RESOLVE_CONTRADICTIONS,
     SYNTHESIZE,
     ActionOutcome,
     ActionRequest,
@@ -13,7 +14,9 @@ from app.research.contracts import (
     EvidenceRef,
     ResearchState,
 )
-from app.research.dag import ResearchDag, build_search_dag, extend_gap_dag
+from app.research.autonomous import AutonomousPlan, AutonomousPlanner
+from app.research.strategy import StrategyMemory, classify_situation
+from app.research.dag import ResearchDag
 from app.research.dispatcher import ActionDispatcher
 from app.research.pool import BoundedWorkerPool
 
@@ -69,6 +72,7 @@ def run_cycle(
     should_cancel=None,
     deadline: str = "",
     pool: BoundedWorkerPool | None = None,
+    strategy: StrategyMemory | None = None,
 ) -> CycleResult:
     """Retrieve, verify, fill gaps, retrieve again, then cite an answer.
 
@@ -77,13 +81,23 @@ def run_cycle(
     """
     session = state if state is not None else ResearchState()
     asked = question.strip()
+    if deadline and _now() >= deadline:
+        raise CycleDeadline(_cycle_snapshot(asked, session))
     workers = pool if pool is not None else BoundedWorkerPool(1)
-    dag = ResearchDag.from_payload(session.dag)
-    dag.recover()
-    dag.expire_due(_now())
-    if not dag.tasks:
-        dag = build_search_dag(asked, user_id=user_id, top_k=top_k, deadline=deadline)
-    session.dag = dag.to_payload()
+    planner = AutonomousPlanner(dispatcher.guardrails, strategy=strategy)
+    plan = AutonomousPlan.from_payload(session.dag)
+    if plan is None:
+        plan = planner.generate(
+            asked,
+            budget=dispatcher.budget,
+            user_id=user_id,
+            top_k=top_k,
+            deadline=deadline,
+        )
+    plan.dag.recover()
+    plan.dag.expire_due(_now())
+    dag = plan.dag
+    session.dag = plan.to_payload()
     ran = 0
 
     def step(request: ActionRequest, task_id: str = "") -> None:
@@ -121,16 +135,22 @@ def run_cycle(
 
     _drain(dag, session, asked, step, workers)
     if "synthesize" not in dag.tasks:
-        alternatives = tuple(reformulate(gap) or gap for gap in session.gaps)
-        extend_gap_dag(
-            dag,
-            tuple(session.gaps),
+        plan.dag = dag
+        plan = planner.revise(
+            plan,
+            quality_action=_revise_action(session, strategy),
+            quality_reason="",
+            gaps=tuple(session.gaps),
+            conflicts=tuple(session.contradictions),
+            executed=set(session.executed),
+            remaining_budget=max(0, dispatcher.budget - session.cost),
+            spent_cost=session.cost,
             user_id=user_id,
             top_k=top_k,
             deadline=deadline,
-            alternatives=alternatives,
         )
-        session.dag = dag.to_payload()
+        dag = plan.dag
+        session.dag = plan.to_payload()
         _drain(dag, session, asked, step, workers)
     return _cycle_snapshot(asked, session)
 
@@ -191,6 +211,21 @@ def _step(
         except TypeError:
             on_progress(state)
     return outcome
+
+
+def _revise_action(session: ResearchState, strategy: StrategyMemory | None = None) -> str:
+    if session.contradictions:
+        fallback = RESOLVE_CONTRADICTIONS
+    elif session.gaps:
+        fallback = FILL_GAPS
+    else:
+        fallback = "stop"
+    if strategy is None:
+        return fallback
+    return strategy.recommend(
+        classify_situation(gaps=session.gaps, conflicts=session.contradictions),
+        fallback,
+    )
 
 
 def _now() -> str:

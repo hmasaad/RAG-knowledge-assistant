@@ -26,6 +26,8 @@ from app.research.loop import PROBE_CONFLICT, REPORT, RETRY, STOP, Decision, Loo
 from app.research.observability import ResearchObserver
 from app.research.quality import apply_quality_gate, evaluate_research
 from app.research.orchestrator import SearchBudget
+from app.research.coordination import CoordinationReport, MultiAgentCoordinator, findings_from_report
+from app.research.strategy import StrategyMemory, StrategyStat
 from app.research.planner import GRAPH_COMPLETION, KNOWLEDGE_COMPLETION, build_plan
 from app.research.rag import KnowledgeRagClient, RagClient, RagSearchResult, SearchFilters, as_retrieval
 from app.research.tools import ToolContext, approved_tools
@@ -85,6 +87,7 @@ class ResearchReport:
     quality_claims: tuple = ()
     quality_confident: bool = True
     reliability: float = 0.0
+    coordination: CoordinationReport | None = None
 
 
 class _EvidenceBoard:
@@ -196,6 +199,8 @@ class ResearchService:
             traces=self._traces,
         )
         self._engineering = engineering if engineering is not None else EngineeringService(metadata.path)
+        self._strategy = StrategyMemory(metadata.path)
+        self._worker.strategy = self._strategy
 
     def research(
         self,
@@ -324,6 +329,8 @@ class ResearchService:
             )
             report = self._block_leaks(report, caller, trace_id)
             _attach_quality(report)
+            _attach_coordination(report, budget=self._budget_limit)
+            self._strategy.learn(report)
             self._traces.step(
                 trace_id,
                 action=report.action,
@@ -567,7 +574,7 @@ class ResearchService:
                 quality_reason=quality_reason,
                 quality_failures=quality_failures,
             )
-            choice = decide(state)
+            choice = decide(state, strategy=self._strategy)
             decisions.append(choice)
             self._traces.step(
                 trace_id,
@@ -627,6 +634,48 @@ class ResearchService:
         report.decision = "stop"
         report.decisions = ()
         return report
+
+    def propose_plan(
+        self,
+        question: str,
+        *,
+        user_id: str | None = None,
+        top_k: int = 4,
+    ):
+        from app.research.autonomous import AutonomousPlanner
+
+        caller = user_id or self._default_user_id
+        planner = AutonomousPlanner(self._worker.guardrails)
+        return planner.generate(
+            question.strip(),
+            budget=self._budget_limit,
+            user_id=caller,
+            top_k=top_k,
+        )
+
+    def learn_strategy(self, situation: str, action: str, reward: float) -> StrategyStat:
+        return self._strategy.observe(situation, action, reward)
+
+    def recommend_strategy(self, situation: str, fallback: str = "stop") -> str:
+        denied = self._worker.guardrails.policy.denied_actions
+        return self._strategy.recommend(situation, fallback, denied=denied)
+
+    def strategy_snapshot(self) -> list[StrategyStat]:
+        return self._strategy.snapshot()
+
+    def coordinate(
+        self,
+        question: str,
+        *,
+        findings: list | None = None,
+        user_id: str | None = None,
+    ) -> CoordinationReport:
+        denied = self._worker.guardrails.policy.denied_actions
+        return MultiAgentCoordinator(denied_actions=denied).coordinate(
+            question.strip(),
+            findings=tuple(findings or ()),
+            budget=self._budget_limit,
+        )
 
     def cycle(
         self,
@@ -792,6 +841,7 @@ class ResearchService:
                 halt_after=halt_after,
                 should_cancel=lambda: self._sessions.cancel_requested(session.id),
                 deadline=session.deadline,
+                strategy=self._strategy,
             )
         except CycleCancelled as cancelled:
             self._state.finish_cancelled(session.id, _result_payload(cancelled.result), state)
@@ -947,6 +997,8 @@ class ResearchService:
                 quality_confident=getattr(report, "quality_confident", None) if report is not None else None,
                 sufficient=getattr(report, "sufficient_evidence", None) if report is not None else None,
             )
+            if report is not None:
+                self._strategy.learn(report)
             _ = finished
         except Exception:
             return
@@ -1031,6 +1083,16 @@ def _quality_feedback(
 def _attach_quality(report: ResearchReport) -> ResearchReport:
     score = apply_quality_gate(report)
     report.reliability = score.reliability
+    return report
+
+
+def _attach_coordination(report: ResearchReport, *, budget: int) -> ResearchReport:
+    report.coordination = MultiAgentCoordinator().coordinate(
+        report.question,
+        findings=findings_from_report(report),
+        conflicts=report.conflicts,
+        budget=budget,
+    )
     return report
 
 
@@ -1245,7 +1307,7 @@ def _cycle_report(
         ResearchStep(question=question, tool=name, status="ok", evidence="", complete=True)
         for name in result.steps
     )
-    return ResearchReport(
+    report = ResearchReport(
         question=question,
         report=result.report,
         sufficient_evidence=result.sufficient_evidence,
@@ -1264,7 +1326,8 @@ def _cycle_report(
         remaining_budget=max(0, budget - result.cost),
         graph=result.graph if getattr(result, "graph", None) is not None else None,
     )
-    return _attach_quality(report)
+    _attach_quality(report)
+    return _attach_coordination(report, budget=budget)
 
 
 def _deadline_at(seconds: float) -> str:

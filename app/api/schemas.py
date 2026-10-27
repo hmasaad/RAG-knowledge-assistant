@@ -309,6 +309,103 @@ class ConflictResponse(BaseModel):
     right_claim_id: str = ""
 
 
+class PlanTaskResponse(BaseModel):
+    id: str
+    action: str
+    depends_on: list[str] = []
+    query: str = ""
+    claim: str = ""
+    status: str = "pending"
+
+
+class ResearchPlanResponse(BaseModel):
+    question: str
+    version: int
+    reason: str
+    revisions: list[str] = []
+    tools: list[str] = []
+    budget: int = 16
+    actions: list[str] = []
+    tasks: list[PlanTaskResponse]
+
+
+class AgentAssignmentResponse(BaseModel):
+    agent_id: str
+    role: str
+    query: str
+    tool: str
+    action: str
+    depends_on: list[str] = []
+
+
+class AgentFindingResponse(BaseModel):
+    agent_id: str
+    role: str
+    claim: str
+    verdict: str
+    source: str = ""
+    values: list[int] = []
+    evidence_ids: list[str] = []
+
+
+class ConflictResolutionResponse(BaseModel):
+    decision: str
+    summary: str
+    kept_claims: list[str] = []
+    dropped_claims: list[str] = []
+    left_agent: str = ""
+    right_agent: str = ""
+
+
+class CoordinationResponse(BaseModel):
+    question: str
+    assignments: list[AgentAssignmentResponse]
+    findings: list[AgentFindingResponse] = []
+    resolutions: list[ConflictResolutionResponse] = []
+    consensus: list[str] = []
+    resolved: bool = True
+
+
+class CoordinateRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    findings: list[AgentFindingResponse] = []
+
+    @field_validator("question")
+    @classmethod
+    def coordinate_question_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Question must not be empty.")
+        return stripped
+
+
+class StrategyObserveRequest(BaseModel):
+    situation: str = Field(min_length=1, max_length=32)
+    action: str = Field(min_length=1, max_length=64)
+    reward: float = Field(ge=0, le=1)
+
+
+class StrategyRecommendRequest(BaseModel):
+    situation: str = Field(min_length=1, max_length=32)
+    fallback: str = "stop"
+
+
+class StrategyStatResponse(BaseModel):
+    situation: str
+    action: str
+    wins: int
+    losses: int
+    last_reward: float = 0
+    score: float = 0
+    samples: int = 0
+
+
+class StrategyRecommendResponse(BaseModel):
+    situation: str
+    action: str
+    fallback: str = "stop"
+
+
 class ResearchResponse(BaseModel):
     question: str
     report: str
@@ -338,6 +435,7 @@ class ResearchResponse(BaseModel):
     quality_failures: list[str] = []
     quality_claims: list["QualityClaimResponse"] = []
     quality_confident: bool = True
+    coordination: CoordinationResponse | None = None
 
 
 class QualityClaimResponse(BaseModel):

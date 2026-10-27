@@ -92,6 +92,7 @@ class ResearchWorker:
         should_cancel=None,
         deadline: str = "",
         pool: BoundedWorkerPool | None = None,
+        strategy=None,
     ) -> CycleResult:
         with self._cycle_lock:
             if self.graph is not None:
@@ -107,6 +108,7 @@ class ResearchWorker:
                 should_cancel=should_cancel,
                 deadline=deadline,
                 pool=pool if pool is not None else self.pool,
+                strategy=strategy if strategy is not None else getattr(self, "strategy", None),
             )
             return replace(result, graph=self.graph)
 

@@ -16,6 +16,7 @@ from app.observability.metrics import Metrics
 from app.observability.tracing import TraceLog
 from app.research.judge import ClaimJudgeAdapter, LazyClaimJudge
 from app.research.rag import KnowledgeRagClient
+from app.engineering.governance import GovernancePolicy, ReadinessProbes
 from app.engineering.service import EngineeringService
 from app.research.service import ResearchReport, ResearchService
 from app.research.adapters import compose_action_adapters
@@ -88,12 +89,24 @@ def build_services(
     blobs = LocalBlobStore(settings.blob_path)
     metrics = Metrics()
     traces = TraceLog(settings.sqlite_path)
-    engineering = EngineeringService(settings.sqlite_path)
     vectors = VectorStore(
         settings.chroma_path,
         settings.collection_name,
         host=settings.chroma_host,
         port=settings.chroma_port,
+    )
+    engineering = EngineeringService(
+        settings.sqlite_path,
+        policy=GovernancePolicy(
+            hold=settings.governance_hold,
+            require_approval=settings.governance_require_approval,
+            operators=parse_names(settings.governance_operators),
+        ),
+        probes=ReadinessProbes(
+            metadata=metadata.generation,
+            vectors=vectors.count,
+            guardrails=lambda: settings.research_search_budget >= 1,
+        ),
     )
     cached_embedder = CachingEmbedder(
         resolved,

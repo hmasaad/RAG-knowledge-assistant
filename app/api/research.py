@@ -6,23 +6,100 @@ from app.api.answer import _citation_response
 from app.api.dependencies import get_services, get_user_id
 from app.api.schemas import (
     AnswerRequest,
+    AgentAssignmentResponse,
+    AgentFindingResponse,
     ClaimLinkResponse,
+    ConflictResolutionResponse,
     ConflictResponse,
+    CoordinateRequest,
+    CoordinationResponse,
     EvidenceGraphResponse,
     EvidenceResponse,
     GraphEdgeResponse,
     GraphNodeResponse,
     QualityClaimResponse,
+    PlanTaskResponse,
+    ResearchPlanResponse,
     ResearchResponse,
     ResearchSessionListItem,
     ResearchSessionListResponse,
     ResearchSubquestionResponse,
     SideEffectResponse,
+    StrategyObserveRequest,
+    StrategyRecommendRequest,
+    StrategyRecommendResponse,
+    StrategyStatResponse,
 )
+from app.research.coordination import finding_from_payload
 from app.api.search import passage_response
 from app.wiring import Services
 
 router = APIRouter(tags=["research"])
+
+
+@router.post("/research/plan", response_model=ResearchPlanResponse)
+def research_plan(
+    body: AnswerRequest,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> ResearchPlanResponse:
+    plan = services.research.propose_plan(body.question, user_id=user_id, top_k=body.top_k)
+    return ResearchPlanResponse(
+        question=plan.question,
+        version=plan.version,
+        reason=plan.reason,
+        revisions=list(plan.revisions),
+        tools=list(plan.tools),
+        budget=plan.budget,
+        actions=list(plan.actions()),
+        tasks=[
+            PlanTaskResponse(
+                id=plan.dag.tasks[task_id].id,
+                action=plan.dag.tasks[task_id].action,
+                depends_on=list(plan.dag.tasks[task_id].depends_on),
+                query=plan.dag.tasks[task_id].query,
+                claim=plan.dag.tasks[task_id].claim,
+                status=plan.dag.tasks[task_id].status,
+            )
+            for task_id in plan.dag.order
+        ],
+    )
+
+
+@router.post("/research/coordinate", response_model=CoordinationResponse)
+def research_coordinate(
+    body: CoordinateRequest,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> CoordinationResponse:
+    report = services.research.coordinate(
+        body.question,
+        findings=[finding_from_payload(item.model_dump()) for item in body.findings],
+        user_id=user_id,
+    )
+    return _coordination_response(report)
+
+
+@router.get("/research/strategy", response_model=list[StrategyStatResponse])
+def read_strategy(services: Services = Depends(get_services)) -> list[StrategyStatResponse]:
+    return [StrategyStatResponse(**item.to_payload()) for item in services.research.strategy_snapshot()]
+
+
+@router.post("/research/strategy", response_model=StrategyStatResponse)
+def observe_strategy(
+    body: StrategyObserveRequest,
+    services: Services = Depends(get_services),
+) -> StrategyStatResponse:
+    return StrategyStatResponse(**services.research.learn_strategy(body.situation, body.action, body.reward).to_payload())
+
+
+@router.post("/research/strategy/recommend", response_model=StrategyRecommendResponse)
+def recommend_strategy(
+    body: StrategyRecommendRequest,
+    services: Services = Depends(get_services),
+) -> StrategyRecommendResponse:
+    action = services.research.recommend_strategy(body.situation, body.fallback)
+    return StrategyRecommendResponse(situation=body.situation, action=action, fallback=body.fallback)
 
 
 @router.post("/research", response_model=ResearchResponse)
@@ -193,6 +270,18 @@ def _research_response(result) -> ResearchResponse:
             for item in result.quality_claims
         ],
         quality_confident=result.quality_confident,
+        coordination=_coordination_response(result.coordination) if result.coordination else None,
+    )
+
+
+def _coordination_response(report) -> CoordinationResponse:
+    return CoordinationResponse(
+        question=report.question,
+        assignments=[AgentAssignmentResponse(**item.to_payload()) for item in report.assignments],
+        findings=[AgentFindingResponse(**item.to_payload()) for item in report.findings],
+        resolutions=[ConflictResolutionResponse(**item.to_payload()) for item in report.resolutions],
+        consensus=list(report.consensus),
+        resolved=report.resolved,
     )
 
 

@@ -44,7 +44,7 @@ def test_evaluation_report_includes_required_fields() -> None:
     names = {item.name for item in report.dimensions}
     assert report.outcome == "success"
     assert report.evaluator_version == EVALUATOR_VERSION
-    assert names == {"correctness", "safety", "recovery"}
+    assert names == {"correctness", "safety", "recovery", "budget"}
     assert report.evidence_refs == ("e1",)
     assert 0 <= report.confidence <= 1
     assert EvaluationReport.from_payload(report.to_payload()).run_id == run_id

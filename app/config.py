@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     research_adapt_rounds: int = Field(default=2, ge=0, le=8)
     research_worker_concurrency: int = Field(default=2, ge=1, le=16)
     research_user_concurrency: int = Field(default=2, ge=1, le=16)
+    governance_hold: bool = False
+    governance_require_approval: bool = True
+    governance_operators: str = ""
     default_user_id: str = "local"
     log_level: str = "INFO"
 

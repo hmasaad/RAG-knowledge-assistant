@@ -6,6 +6,7 @@ from app.generation.agent import reformulate
 from app.research.contracts import FILL_GAPS, RESOLVE_CONTRADICTIONS
 from app.research.guardrails import BUDGET_EXHAUSTED, ResearchGuardrails
 from app.research.quality import INSUFFICIENT_REASON, UNSUPPORTED_CLAIM
+from app.research.strategy import classify_situation
 
 REPORT = "report"
 RETRY = "retry"
@@ -38,7 +39,11 @@ class Decision:
     query: str = ""
 
 
-def decide(state: LoopState, guardrails: ResearchGuardrails | None = None) -> Decision:
+def decide(
+    state: LoopState,
+    guardrails: ResearchGuardrails | None = None,
+    strategy=None,
+) -> Decision:
     """Pick the next action from quality, contradictions, gaps, and cost.
 
     Further research is skipped when the budget is gone or another search
@@ -52,9 +57,17 @@ def decide(state: LoopState, guardrails: ResearchGuardrails | None = None) -> De
     adapts = state.gap_retries + state.conflict_probes
     if adapts >= state.max_adapts:
         return _finish(state, "The adaptive research budget is spent.")
-    prefer_conflict = (
-        state.quality_action == RESOLVE_CONTRADICTIONS or bool(state.unresolved_conflicts)
-    )
+    quality_action = state.quality_action
+    if strategy is not None:
+        quality_action = strategy.recommend(
+            classify_situation(
+                gaps=state.gaps,
+                conflicts=state.unresolved_conflicts,
+                sufficient=state.complete,
+            ),
+            quality_action or "stop",
+        )
+    prefer_conflict = quality_action == RESOLVE_CONTRADICTIONS or bool(state.unresolved_conflicts)
     if (
         prefer_conflict
         and state.unresolved_conflicts
@@ -67,8 +80,8 @@ def decide(state: LoopState, guardrails: ResearchGuardrails | None = None) -> De
             query=state.unresolved_conflicts[0],
         )
     next_gap = retryable_gap(state.gaps)
-    if next_gap and state.gap_retries < 1 and state.quality_action != RESOLVE_CONTRADICTIONS:
-        reason = state.quality_reason if state.quality_action == FILL_GAPS else "Missing information."
+    if next_gap and state.gap_retries < 1 and quality_action != RESOLVE_CONTRADICTIONS:
+        reason = state.quality_reason if quality_action == FILL_GAPS else "Missing information."
         return Decision(RETRY, reason, query=next_gap)
     return _finish(state, "Further research is not worth the remaining budget.")
 
