@@ -151,8 +151,8 @@ def resolve_document(root: Path, name: str) -> Path:
     raise FileNotFoundError(name)
 
 
-def _services(directory: Path) -> Services:
-    settings = Settings(
+def _services(directory: Path, **overrides) -> Services:
+    values = dict(
         embedding_provider="local",
         embedding_dimension=128,
         chroma_path=directory / "chroma",
@@ -164,7 +164,8 @@ def _services(directory: Path) -> Services:
         log_level="WARNING",
         llm_provider="local",
     )
-    return build_services(settings, embedder=LocalEmbedder(dimension=128))
+    values.update(overrides)
+    return build_services(Settings(**values), embedder=LocalEmbedder(dimension=128))
 
 
 def _answer_case(case: QualityCase, services: Services) -> CaseResult:

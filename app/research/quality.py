@@ -11,6 +11,7 @@ UNSUPPORTED_CLAIM = "unsupported_claim"
 CONFLICTING_EVIDENCE = "conflicting_evidence"
 STALE_SOURCE = "stale_source"
 INCOMPLETE_ANSWER = "incomplete_answer"
+INSUFFICIENT_REASON = "Evidence is insufficient to answer confidently."
 
 CRITERIA = (
     "completeness",
@@ -161,6 +162,48 @@ def recommend_research(
     if MISSING_EVIDENCE in labels or INCOMPLETE_ANSWER in labels:
         return FILL_GAPS, "The answer is missing evidence."
     return "stop", "Further research is not required."
+
+
+def is_confident(score: ResearchQualityScore, report) -> bool:
+    """True when every published claim is grounded, or the report honestly refuses."""
+    text = getattr(report, "report", "") or ""
+    if is_refusal(text):
+        return True
+    supported = [item for item in score.claims if item.supports]
+    weak = [
+        item
+        for item in score.claims
+        if UNSUPPORTED_CLAIM in item.failures or MISSING_EVIDENCE in item.failures
+    ]
+    if weak:
+        return False
+    if not score.claims and not getattr(report, "sufficient_evidence", False):
+        return False
+    if not supported and score.claims:
+        return False
+    return True
+
+
+def apply_quality_gate(report) -> ResearchQualityScore:
+    """Attach claim scores and refuse when the answer is not confident."""
+    score = evaluate_research(report)
+    confident = is_confident(score, report)
+    report.quality_action = score.recommendation
+    report.quality_reason = score.recommendation_reason
+    report.quality_failures = score.failures
+    report.quality_claims = score.claims
+    report.quality_confident = confident
+    if confident:
+        return score
+    report.report = REFUSAL_TEXT
+    report.sufficient_evidence = False
+    report.action = "refuse"
+    report.citations = []
+    report.passages = []
+    report.decision = "stop"
+    report.quality_action = "stop"
+    report.quality_reason = INSUFFICIENT_REASON
+    return score
 
 
 def _observed_spec(report) -> ResearchQualitySpec:

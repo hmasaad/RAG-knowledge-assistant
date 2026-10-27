@@ -15,6 +15,11 @@ def test_end_to_end_suite_meets_the_baseline() -> None:
     baseline = load_baseline(ROOT / "evaluation" / "baselines" / "research_e2e.json")
 
     assert "completed" not in scores
+    assert scores["evidence_backed"] == 1.0
+    assert scores["budget_respect"] == 1.0
+    assert scores["recovery"] == 1.0
+    assert scores["refusal_accuracy"] == 1.0
+    assert scores["security_respect"] == 1.0
     for name, floor in baseline.items():
         assert scores[name] >= floor, f"{name}={scores[name]} below {floor}"
 

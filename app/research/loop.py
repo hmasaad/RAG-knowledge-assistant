@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from app.generation.agent import reformulate
 from app.research.contracts import FILL_GAPS, RESOLVE_CONTRADICTIONS
 from app.research.guardrails import BUDGET_EXHAUSTED, ResearchGuardrails
+from app.research.quality import INSUFFICIENT_REASON, UNSUPPORTED_CLAIM
 
 REPORT = "report"
 RETRY = "retry"
@@ -26,6 +27,8 @@ class LoopState:
     max_adapts: int = 2
     quality_action: str = ""
     quality_reason: str = ""
+    quality_failures: tuple[str, ...] = ()
+    spent_cost: int = 0
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,7 @@ def decide(state: LoopState, guardrails: ResearchGuardrails | None = None) -> De
     is unlikely to change the report. Guardrails win over a quality retry.
     """
     rails = guardrails or ResearchGuardrails()
-    if rails.should_stop(state.remaining_budget):
+    if rails.should_stop(state.remaining_budget, state.spent_cost):
         return Decision(STOP, BUDGET_EXHAUSTED)
     if state.complete and not state.gaps and not state.unresolved_conflicts:
         return Decision(REPORT, "Evidence is sufficient.")
@@ -80,8 +83,8 @@ def retryable_gap(gaps: tuple[str, ...]) -> str:
 
 
 def _finish(state: LoopState, costly: str) -> Decision:
-    if state.supported:
+    if state.supported and UNSUPPORTED_CLAIM not in state.quality_failures:
         return Decision(REPORT, costly)
     if state.complete and not state.gaps:
         return Decision(REPORT, "Evidence is sufficient.")
-    return Decision(STOP, costly)
+    return Decision(STOP, INSUFFICIENT_REASON)

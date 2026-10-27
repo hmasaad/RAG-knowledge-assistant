@@ -87,6 +87,7 @@ class ResearchState:
     iterations: int = 0
     report: str = ""
     steps: list[str] = field(default_factory=list)
+    dag: dict = field(default_factory=dict)
 
     def to_payload(self) -> dict:
         return {
@@ -116,6 +117,7 @@ class ResearchState:
             "iterations": self.iterations,
             "report": self.report,
             "steps": list(self.steps),
+            "dag": dict(self.dag or {}),
         }
 
     @classmethod
@@ -153,6 +155,7 @@ class ResearchState:
             iterations=int(data.get("iterations", 0) or 0),
             report=str(data.get("report", "")),
             steps=list(data.get("steps", [])),
+            dag=dict(data.get("dag", {}) or {}),
         )
 
     def fingerprint(self, request: ActionRequest) -> tuple[str, str, str]:

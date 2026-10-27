@@ -12,6 +12,7 @@ from app.api.schemas import (
     EvidenceResponse,
     GraphEdgeResponse,
     GraphNodeResponse,
+    QualityClaimResponse,
     ResearchResponse,
     ResearchSessionListItem,
     ResearchSessionListResponse,
@@ -179,6 +180,19 @@ def _research_response(result) -> ResearchResponse:
         quality_action=result.quality_action,
         quality_reason=result.quality_reason,
         quality_failures=list(result.quality_failures),
+        quality_claims=[
+            QualityClaimResponse(
+                claim=item.claim,
+                marker=item.marker,
+                citation_exists=item.citation_exists,
+                supports=item.supports,
+                support_ratio=item.support_ratio,
+                filename=item.filename,
+                failures=list(item.failures),
+            )
+            for item in result.quality_claims
+        ],
+        quality_confident=result.quality_confident,
     )
 
 

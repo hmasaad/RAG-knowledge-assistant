@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from app import __version__
 from app.api.answer import router as answer_router
 from app.api.claims import router as claims_router
+from app.api.engineering import router as engineering_router
 from app.api.documents import router as documents_router
 from app.api.embeddings import router as embeddings_router
 from app.api.operations import router as operations_router
@@ -117,6 +118,7 @@ def create_app(
     application.include_router(claims_router, prefix="/api")
     application.include_router(research_router, prefix="/api")
     application.include_router(operations_router, prefix="/api")
+    application.include_router(engineering_router, prefix="/api")
     mount_ui(application)
     return application
 

@@ -16,6 +16,7 @@ from app.observability.metrics import Metrics
 from app.observability.tracing import TraceLog
 from app.research.judge import ClaimJudgeAdapter, LazyClaimJudge
 from app.research.rag import KnowledgeRagClient
+from app.engineering.service import EngineeringService
 from app.research.service import ResearchReport, ResearchService
 from app.research.adapters import compose_action_adapters
 from app.research.graph import EvidenceGraph
@@ -41,6 +42,7 @@ class Services:
     research: ResearchService
     claim_judge: ClaimJudgeAdapter
     traces: TraceLog
+    engineering: EngineeringService
 
 
 class LazyEmbedder:
@@ -85,7 +87,8 @@ def build_services(
     metadata = MetadataStore(settings.sqlite_path)
     blobs = LocalBlobStore(settings.blob_path)
     metrics = Metrics()
-    traces = TraceLog()
+    traces = TraceLog(settings.sqlite_path)
+    engineering = EngineeringService(settings.sqlite_path)
     vectors = VectorStore(
         settings.chroma_path,
         settings.collection_name,
@@ -151,13 +154,14 @@ def build_services(
     rag_client = KnowledgeRagClient(search, timeout=settings.research_timeout_seconds)
     tool_registry = approved_tools(rag=rag_client, metadata=metadata)
     evidence_graph = EvidenceGraph()
-    research_observer = ResearchObserver(metrics)
+    research_observer = ResearchObserver(metrics, traces)
     research_guardrails = ResearchGuardrails(
         GuardrailPolicy(
             budget=settings.research_search_budget,
             max_iterations=max(8, settings.research_search_budget),
             max_cost=settings.research_max_cost,
             denied_tools=parse_names(settings.research_denied_tools),
+            denied_actions=parse_names(settings.research_denied_actions),
         )
     )
     research = ResearchService(
@@ -192,6 +196,7 @@ def build_services(
         worker_concurrency=settings.research_worker_concurrency,
         user_concurrency=settings.research_user_concurrency,
         worker_id=f"worker-{id(metrics)}",
+        engineering=engineering,
     )
     claim_judge = ClaimJudgeAdapter(
         rag=rag_client,
@@ -214,6 +219,7 @@ def build_services(
         research=research,
         claim_judge=claim_judge,
         traces=traces,
+        engineering=engineering,
     )
 
 

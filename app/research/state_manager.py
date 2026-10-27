@@ -29,6 +29,7 @@ class DurableResearchStateManager:
         trace_id: str = "",
         status: str = "queued",
         priority: int = 0,
+        deadline: str = "",
     ) -> ResearchSession:
         return self.store.create(
             user_id=user_id,
@@ -37,6 +38,7 @@ class DurableResearchStateManager:
             trace_id=trace_id,
             status=status,
             priority=priority,
+            deadline=deadline,
         )
 
     def get(self, session_id: str) -> ResearchSession | None:
@@ -75,7 +77,9 @@ class DurableResearchStateManager:
 
     def recover(self) -> int:
         """Requeue sessions whose lease expired. Does not claim the next job."""
-        return self.store.requeue_expired(self.lease_seconds)
+        requeued = self.store.requeue_expired(self.lease_seconds)
+        self.store.expire_deadlines()
+        return requeued
 
     def halt(self, session_id: str, result: dict, state: ResearchState) -> None:
         self.store.halt(session_id, result, state)

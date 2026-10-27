@@ -3,6 +3,7 @@
 import re
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 
 from app.generation.agent import CLARIFICATION_TEXT, needs_clarification, reformulate
 from app.generation.answerers import Answerer
@@ -23,17 +24,19 @@ from app.research.evidence import ClaimLink, EvidenceRecord, EvidenceStore
 from app.research.graph import EvidenceGraph, ProvenanceEngine
 from app.research.loop import PROBE_CONFLICT, REPORT, RETRY, STOP, Decision, LoopState, decide
 from app.research.observability import ResearchObserver
-from app.research.quality import evaluate_research
+from app.research.quality import apply_quality_gate, evaluate_research
 from app.research.orchestrator import SearchBudget
 from app.research.planner import GRAPH_COMPLETION, KNOWLEDGE_COMPLETION, build_plan
 from app.research.rag import KnowledgeRagClient, RagClient, RagSearchResult, SearchFilters, as_retrieval
 from app.research.tools import ToolContext, approved_tools
 from app.ingestion.errors import KnowledgeError
 from app.research.contracts import ClaimVerdict, EvidenceRef, ResearchState
-from app.research.cycle import CycleCancelled, CycleHalted, CycleResult
+from app.research.cycle import CycleCancelled, CycleDeadline, CycleHalted, CycleResult
 from app.research.jobs import ProductionResearchOrchestrator
 from app.research.sessions import ResearchSession, ResearchSessionStore
 from app.research.state_manager import DurableResearchStateManager
+from app import __version__
+from app.engineering.service import EngineeringService
 from app.research.worker import ResearchWorker
 from app.retrieval.search import RankedPassage, SearchService
 from app.security.leakage import answer_leaks
@@ -79,6 +82,9 @@ class ResearchReport:
     quality_action: str = "stop"
     quality_reason: str = ""
     quality_failures: tuple[str, ...] = ()
+    quality_claims: tuple = ()
+    quality_confident: bool = True
+    reliability: float = 0.0
 
 
 class _EvidenceBoard:
@@ -152,14 +158,15 @@ class ResearchService:
         worker_concurrency: int = 2,
         user_concurrency: int = 2,
         worker_id: str = "worker",
+        engineering: EngineeringService | None = None,
     ) -> None:
         self._retrieval = retrieval
         self._answerer = answerer
         self._metadata = metadata
         self._cache = cache
         self._metrics = metrics
-        self._observer = ResearchObserver(metrics)
         self._traces = traces if traces is not None else TraceLog()
+        self._observer = ResearchObserver(metrics, self._traces)
         self._default_user_id = default_user_id
         self._rag = rag if rag is not None else KnowledgeRagClient(retrieval, timeout=search_timeout)
         self._budget_limit = search_budget
@@ -185,7 +192,10 @@ class ResearchService:
             concurrency=worker_concurrency,
             user_concurrency=user_concurrency,
             worker_id=worker_id,
+            metrics=metrics,
+            traces=self._traces,
         )
+        self._engineering = engineering if engineering is not None else EngineeringService(metadata.path)
 
     def research(
         self,
@@ -206,59 +216,75 @@ class ResearchService:
         self._metrics.inc("rag_research_requests_total")
         started = time.perf_counter()
         trace_id = self._traces.start(user_id=caller, question=asked)
-        if needs_clarification(asked):
-            report = _empty_report(asked, CLARIFICATION_TEXT, action="clarify", trace_id=trace_id)
-            self._traces.step(trace_id, action="clarify")
-            self._finish(key, caller, report, started)
-            return report
+        with self._observer.on_trace(trace_id):
+            if needs_clarification(asked):
+                report = _empty_report(asked, CLARIFICATION_TEXT, action="clarify", trace_id=trace_id)
+                self._traces.step(trace_id, action="clarify")
+                self._finish(key, caller, report, started)
+                return report
 
-        plan = build_plan(asked, budget=self._budget_limit)
-        budget = SearchBudget(plan.budget)
-        store = EvidenceStore()
-        self._traces.step(
-            trace_id,
-            action="plan",
-            query=" | ".join(task.question for task in plan.tasks),
-            tool=",".join(plan.tools),
-            hit_count=len(plan.tasks),
-        )
-        board = _EvidenceBoard()
-        steps: list[ResearchStep] = []
-        contradictions: list[str] = []
-        conflicts: list[Contradiction] = []
-        gaps: list[str] = []
-        evidence: list[str] = []
-        searched: set[str] = set()
+            plan = build_plan(asked, budget=self._budget_limit)
+            budget = SearchBudget(plan.budget)
+            store = EvidenceStore()
+            self._traces.step(
+                trace_id,
+                action="plan",
+                query=" | ".join(task.question for task in plan.tasks),
+                tool=",".join(plan.tools),
+                hit_count=len(plan.tasks),
+            )
+            board = _EvidenceBoard()
+            steps: list[ResearchStep] = []
+            contradictions: list[str] = []
+            conflicts: list[Contradiction] = []
+            gaps: list[str] = []
+            evidence: list[str] = []
+            searched: set[str] = set()
 
-        catalog = self._catalog(caller, plan.tools, trace_id)
-        for task in plan.tasks:
-            step = self._investigate(
-                task.question,
-                tool=task.tool,
-                completion=task.completion,
+            catalog = self._catalog(caller, plan.tools, trace_id)
+            for task in plan.tasks:
+                step = self._investigate(
+                    task.question,
+                    tool=task.tool,
+                    completion=task.completion,
+                    top_k=top_k,
+                    caller=caller,
+                    trace_id=trace_id,
+                    board=board,
+                    contradictions=contradictions,
+                    conflicts=conflicts,
+                    gaps=gaps,
+                    evidence=evidence,
+                    budget=budget,
+                    store=store,
+                )
+                steps.append(step)
+                searched.add(task.question.casefold())
+            for subquestion in plan.deferred:
+                gaps.append(subquestion)
+                steps.append(
+                    ResearchStep(subquestion, "knowledge", "gap", "", KNOWLEDGE_COMPLETION, False)
+                )
+            if "graph" in plan.tools:
+                self._investigate_graph(
+                    asked,
+                    caller=caller,
+                    top_k=top_k,
+                    trace_id=trace_id,
+                    board=board,
+                    steps=steps,
+                    contradictions=contradictions,
+                    conflicts=conflicts,
+                    gaps=gaps,
+                    evidence=evidence,
+                    searched=searched,
+                    budget=budget,
+                    store=store,
+                )
+
+            decisions = self._adapt(
                 top_k=top_k,
                 caller=caller,
-                trace_id=trace_id,
-                board=board,
-                contradictions=contradictions,
-                conflicts=conflicts,
-                gaps=gaps,
-                evidence=evidence,
-                budget=budget,
-                store=store,
-            )
-            steps.append(step)
-            searched.add(task.question.casefold())
-        for subquestion in plan.deferred:
-            gaps.append(subquestion)
-            steps.append(
-                ResearchStep(subquestion, "knowledge", "gap", "", KNOWLEDGE_COMPLETION, False)
-            )
-        if "graph" in plan.tools:
-            self._investigate_graph(
-                asked,
-                caller=caller,
-                top_k=top_k,
                 trace_id=trace_id,
                 board=board,
                 steps=steps,
@@ -270,57 +296,42 @@ class ResearchService:
                 budget=budget,
                 store=store,
             )
-
-        decisions = self._adapt(
-            top_k=top_k,
-            caller=caller,
-            trace_id=trace_id,
-            board=board,
-            steps=steps,
-            contradictions=contradictions,
-            conflicts=conflicts,
-            gaps=gaps,
-            evidence=evidence,
-            searched=searched,
-            budget=budget,
-            store=store,
-        )
-        last = decisions[-1] if decisions else Decision(REPORT, "Evidence is sufficient.")
-        verified = [step for step in steps if step.status in {"supported", "contradicted"}]
-        action = "research" if verified or contradictions or catalog else "refuse"
-        report_text = _render(evidence, contradictions, gaps, catalog, refused=not verified)
-        report = ResearchReport(
-            question=asked,
-            report=report_text,
-            sufficient_evidence=bool(verified) and not gaps,
-            conflict=bool(contradictions),
-            tools=plan.tools,
-            subquestions=tuple(steps),
-            contradictions=tuple(contradictions),
-            gaps=tuple(gaps),
-            catalog=catalog,
-            citations=board.citations(),
-            passages=list(board.passages),
-            action=action,
-            trace_id=trace_id,
-            evidence_records=tuple(store.records),
-            links=tuple(store.links),
-            conflicts=tuple(conflicts),
-            graph=ProvenanceEngine(self._metadata).from_research(store.records, conflicts),
-            decision=last.action,
-            decisions=tuple(item.action for item in decisions),
-            remaining_budget=budget.remaining(),
-        )
-        report = self._block_leaks(report, caller, trace_id)
-        _attach_quality(report)
-        self._traces.step(
-            trace_id,
-            action=report.action,
-            sufficient_evidence=report.sufficient_evidence,
-            hit_count=len(report.citations),
-        )
-        self._finish(key, caller, report, started)
-        return report
+            last = decisions[-1] if decisions else Decision(REPORT, "Evidence is sufficient.")
+            verified = [step for step in steps if step.status in {"supported", "contradicted"}]
+            action = "research" if verified or contradictions or catalog else "refuse"
+            report_text = _render(evidence, contradictions, gaps, catalog, refused=not verified)
+            report = ResearchReport(
+                question=asked,
+                report=report_text,
+                sufficient_evidence=bool(verified) and not gaps,
+                conflict=bool(contradictions),
+                tools=plan.tools,
+                subquestions=tuple(steps),
+                contradictions=tuple(contradictions),
+                gaps=tuple(gaps),
+                catalog=catalog,
+                citations=board.citations(),
+                passages=list(board.passages),
+                action=action,
+                trace_id=trace_id,
+                evidence_records=tuple(store.records),
+                links=tuple(store.links),
+                conflicts=tuple(conflicts),
+                graph=ProvenanceEngine(self._metadata).from_research(store.records, conflicts),
+                decision=last.action,
+                decisions=tuple(item.action for item in decisions),
+                remaining_budget=budget.remaining(),
+            )
+            report = self._block_leaks(report, caller, trace_id)
+            _attach_quality(report)
+            self._traces.step(
+                trace_id,
+                action=report.action,
+                sufficient_evidence=report.sufficient_evidence,
+                hit_count=len(report.citations),
+            )
+            self._finish(key, caller, report, started)
+            return report
 
     def _investigate(
         self,
@@ -407,6 +418,7 @@ class ResearchService:
             top_k=top_k,
             filters=SearchFilters(user_id=caller),
             budget=budget,
+            document_ids=set(self._metadata.readable_versions(caller)),
         )
         first = self._worker.execute("knowledge", question, context)
         if first.error == "Search budget exhausted.":
@@ -535,7 +547,7 @@ class ResearchService:
         gap_retries = 0
         conflict_probes = 0
         while True:
-            quality_action, quality_reason, _failures = _quality_feedback(
+            quality_action, quality_reason, quality_failures = _quality_feedback(
                 board,
                 evidence,
                 contradictions,
@@ -553,6 +565,7 @@ class ResearchService:
                 max_adapts=self._adapt_rounds,
                 quality_action=quality_action,
                 quality_reason=quality_reason,
+                quality_failures=quality_failures,
             )
             choice = decide(state)
             decisions.append(choice)
@@ -652,11 +665,15 @@ class ResearchService:
             top_k=top_k,
             trace_id=trace_id,
             priority=priority,
+            deadline=_deadline_at(self._job_timeout_seconds),
         )
+        self._traces.update(trace_id, session_id=session.id)
+        self._begin_run(session)
         if needs_clarification(asked):
             report = _empty_report(asked, CLARIFICATION_TEXT, action="clarify", trace_id=trace_id)
             report.session_id = session.id
             report.status = "completed"
+            self._traces.update(trace_id, session_id=session.id)
             self._state.complete(
                 session.id,
                 {
@@ -735,8 +752,31 @@ class ResearchService:
         if session is None:
             raise KnowledgeError("Research session not found.", status_code=404)
         clock = started if started is not None else time.perf_counter()
+        self._traces.start(
+            trace_id=session.trace_id,
+            user_id=session.user_id,
+            question=session.question,
+            session_id=session.id,
+        )
+        with self._observer.on_trace(session.trace_id):
+            return self._run_session_traced(
+                session,
+                clock,
+                claimed=claimed,
+                halt_after=halt_after,
+            )
+
+    def _run_session_traced(
+        self,
+        session,
+        clock: float,
+        *,
+        claimed: bool,
+        halt_after: int | None,
+    ) -> ResearchReport:
         if not claimed:
             self._state.acquire(session.id)
+        self._begin_run(session)
         state = self._state.restore(session.id)
         try:
             result = self._worker.cycle(
@@ -747,9 +787,11 @@ class ResearchService:
                 on_progress=lambda progress, request=None, outcome=None: (
                     self._state.checkpoint(session.id, progress, request, outcome),
                     self._state.heartbeat(session.id),
+                    self._record_progress(session.id, request, outcome),
                 ),
                 halt_after=halt_after,
                 should_cancel=lambda: self._sessions.cancel_requested(session.id),
+                deadline=session.deadline,
             )
         except CycleCancelled as cancelled:
             self._state.finish_cancelled(session.id, _result_payload(cancelled.result), state)
@@ -762,11 +804,37 @@ class ResearchService:
             report.session_id = session.id
             report.status = "cancelled"
             report.decision = "stop"
+            self._close_run(session, report, status="cancelled")
             self._observer.record_request(
                 "cycle",
                 seconds=time.perf_counter() - clock,
                 cost=max(0, self._budget_limit - report.remaining_budget),
                 status="cancelled",
+                reliability=report.reliability,
+                quality_confident=report.quality_confident,
+                quality_failures=report.quality_failures,
+            )
+            return self._with_effects(report, session.id)
+        except CycleDeadline as expired:
+            self._state.fail(session.id, "Deadline exceeded.", state)
+            report = _cycle_report(
+                session.question,
+                expired.result,
+                trace_id=session.trace_id,
+                budget=self._budget_limit,
+            )
+            report.session_id = session.id
+            report.status = "failed"
+            report.decision = "stop"
+            self._close_run(session, report, status="failed", error="Deadline exceeded.")
+            self._observer.record_request(
+                "cycle",
+                seconds=time.perf_counter() - clock,
+                cost=max(0, self._budget_limit - report.remaining_budget),
+                status="failed",
+                reliability=report.reliability,
+                quality_confident=report.quality_confident,
+                quality_failures=report.quality_failures,
             )
             return self._with_effects(report, session.id)
         except CycleHalted as halted:
@@ -780,11 +848,15 @@ class ResearchService:
             report.session_id = session.id
             report.status = "halted"
             report.decision = "stop"
+            self._close_run(session, report, status="halted")
             self._observer.record_request(
                 "cycle",
                 seconds=time.perf_counter() - clock,
                 cost=max(0, self._budget_limit - report.remaining_budget),
                 status="halted",
+                reliability=report.reliability,
+                quality_confident=report.quality_confident,
+                quality_failures=report.quality_failures,
             )
             return self._with_effects(report, session.id)
         except Exception as exc:
@@ -795,9 +867,8 @@ class ResearchService:
                 error=str(exc) or type(exc).__name__,
             )
             self._state.fail(session.id, str(exc) or type(exc).__name__, state)
+            self._close_run(session, None, status="failed", error=str(exc) or type(exc).__name__)
             raise
-        for step in result.steps:
-            self._traces.step(session.trace_id, action=step, query=session.question, tool=step)
         report = _cycle_report(
             session.question,
             result,
@@ -808,8 +879,77 @@ class ResearchService:
         report.status = "completed"
         self._state.complete(session.id, _result_payload(result), state)
         self._traces.step(session.trace_id, action=report.action)
+        self._close_run(session, report, status="completed")
         self._finish(("research_cycle", session.id), session.user_id, report, clock)
         return self._with_effects(report, session.id)
+
+    def _begin_run(self, session) -> None:
+        if self._engineering is None:
+            return
+        try:
+            self._engineering.start_run(
+                run_id=session.id,
+                agent_version=__version__,
+                session_id=session.id,
+                trace_id=session.trace_id,
+                question=session.question,
+            )
+        except Exception:
+            return
+
+    def _record_progress(self, session_id: str, request, outcome) -> None:
+        if self._engineering is None or request is None or outcome is None:
+            return
+        try:
+            error = getattr(outcome, "error", "") or ""
+            if "permitted" in error.casefold() or "denied" in error.casefold():
+                self._engineering.record_policy(session_id, error, action=request.action)
+            self._engineering.record_tool(
+                session_id,
+                request.action,
+                ok=bool(outcome.ok),
+                error=error,
+                query=getattr(request, "query", "") or getattr(request, "claim", ""),
+                cost=int(getattr(outcome, "cost", 0) or 0),
+            )
+            for verdict in getattr(outcome, "verdicts", ()) or ():
+                self._engineering.record_verification(
+                    session_id,
+                    verdict.claim,
+                    ok=verdict.verdict == "supported",
+                    evidence_ids=tuple(verdict.evidence_ids),
+                )
+        except Exception:
+            return
+
+    def _close_run(self, session, report, *, status: str, error: str = "") -> None:
+        if self._engineering is None:
+            return
+        try:
+            cost = 0
+            duration = 0.0
+            tokens = 0
+            if report is not None:
+                cost = float(max(0, self._budget_limit - report.remaining_budget))
+                tokens = int(cost * 250)
+            finished = self._engineering.finish_run(
+                session.id,
+                status=status,
+                duration_ms=duration,
+                token_usage=tokens,
+                estimated_cost=cost,
+                error=error,
+            )
+            self._engineering.evaluate(
+                session.id,
+                workflow_state=status,
+                reliability=getattr(report, "reliability", None) if report is not None else None,
+                quality_confident=getattr(report, "quality_confident", None) if report is not None else None,
+                sufficient=getattr(report, "sufficient_evidence", None) if report is not None else None,
+            )
+            _ = finished
+        except Exception:
+            return
 
     def _with_effects(self, report: ResearchReport, session_id: str) -> ResearchReport:
         report.side_effects = tuple(self._state.side_effects(session_id))
@@ -843,6 +983,9 @@ class ResearchService:
             seconds=elapsed,
             cost=max(0, self._budget_limit - report.remaining_budget),
             status=report.status or report.action,
+            reliability=report.reliability,
+            quality_confident=report.quality_confident,
+            quality_failures=report.quality_failures,
         )
         log_event(
             "rag.research",
@@ -886,10 +1029,8 @@ def _quality_feedback(
 
 
 def _attach_quality(report: ResearchReport) -> ResearchReport:
-    score = evaluate_research(report)
-    report.quality_action = score.recommendation
-    report.quality_reason = score.recommendation_reason
-    report.quality_failures = score.failures
+    score = apply_quality_gate(report)
+    report.reliability = score.reliability
     return report
 
 
@@ -905,6 +1046,7 @@ def _loop_state(
     max_adapts: int,
     quality_action: str = "",
     quality_reason: str = "",
+    quality_failures: tuple[str, ...] = (),
 ) -> LoopState:
     verified = [step for step in steps if step.status in {"supported", "contradicted"}]
     files = {record.source.filename for record in store.records}
@@ -915,11 +1057,13 @@ def _loop_state(
         gaps=tuple(gaps),
         unresolved_conflicts=unresolved,
         remaining_budget=budget.remaining(),
+        spent_cost=budget.used,
         gap_retries=gap_retries,
         conflict_probes=conflict_probes,
         max_adapts=max_adapts,
         quality_action=quality_action,
         quality_reason=quality_reason,
+        quality_failures=quality_failures,
     )
 
 
@@ -1121,6 +1265,12 @@ def _cycle_report(
         graph=result.graph if getattr(result, "graph", None) is not None else None,
     )
     return _attach_quality(report)
+
+
+def _deadline_at(seconds: float) -> str:
+    if seconds <= 0:
+        return ""
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
 
 
 def _empty_report(question: str, text: str, *, action: str, trace_id: str) -> ResearchReport:

@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS research_sessions (
     lease_until TEXT,
     lease_owner TEXT NOT NULL DEFAULT '',
     priority INTEGER NOT NULL DEFAULT 0,
-    cancel_requested INTEGER NOT NULL DEFAULT 0
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    deadline TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_research_sessions_user
     ON research_sessions(user_id, updated_at);
@@ -88,6 +89,7 @@ class ResearchSession:
     lease_owner: str = ""
     priority: int = 0
     cancel_requested: bool = False
+    deadline: str = ""
 
 
 class ResearchSessionStore:
@@ -109,6 +111,7 @@ class ResearchSessionStore:
         trace_id: str = "",
         status: str = "queued",
         priority: int = 0,
+        deadline: str = "",
     ) -> ResearchSession:
         session_id = uuid.uuid4().hex
         now = _now()
@@ -117,10 +120,21 @@ class ResearchSessionStore:
                 """
                 INSERT INTO research_sessions (
                     id, user_id, question, top_k, status, trace_id,
-                    created_at, updated_at, priority
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, priority, deadline
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, user_id, question, top_k, status, trace_id, now, now, max(0, priority)),
+                (
+                    session_id,
+                    user_id,
+                    question,
+                    top_k,
+                    status,
+                    trace_id,
+                    now,
+                    now,
+                    max(0, priority),
+                    deadline,
+                ),
             )
         stored = self.get(session_id)
         if stored is None:
@@ -390,6 +404,22 @@ class ResearchSessionStore:
             )
             return int(cursor.rowcount or 0)
 
+    def expire_deadlines(self) -> int:
+        """Fail queued sessions whose deadline has already passed."""
+        now = _now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE research_sessions
+                SET status = 'failed', error = 'Deadline exceeded.',
+                    finished_at = ?, updated_at = ?, lease_until = NULL, lease_owner = ''
+                WHERE status = 'queued'
+                  AND deadline IS NOT NULL AND deadline != '' AND deadline < ?
+                """,
+                (now, now, now),
+            )
+            return int(cursor.rowcount or 0)
+
     def cancel(self, session_id: str) -> ResearchSession | None:
         """Stop a queued job now, or ask a running job to stop at the next step."""
         now = _now()
@@ -453,6 +483,7 @@ class ResearchSessionStore:
     ) -> ResearchSession | None:
         """Take the highest-priority queued cycle the caller may still run."""
         self.requeue_expired(stale_after_seconds)
+        self.expire_deadlines()
         connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         connection.row_factory = sqlite3.Row
         try:
@@ -468,7 +499,9 @@ class ResearchSessionStore:
                     GROUP BY user_id
                     HAVING COUNT(*) >= ?
                   )
-                ORDER BY priority DESC, created_at, id
+                ORDER BY priority DESC,
+                    CASE WHEN deadline IS NULL OR deadline = '' THEN 1 ELSE 0 END,
+                    deadline, created_at, id
                 LIMIT 1
                 """,
                 (max(1, user_concurrency),),
@@ -554,6 +587,7 @@ def _session(row: sqlite3.Row) -> ResearchSession:
         lease_owner=row["lease_owner"] if "lease_owner" in row.keys() else "",
         priority=int(row["priority"]) if "priority" in row.keys() else 0,
         cancel_requested=bool(row["cancel_requested"]) if "cancel_requested" in row.keys() else False,
+        deadline=row["deadline"] if "deadline" in row.keys() and row["deadline"] else "",
     )
 
 
@@ -619,6 +653,8 @@ def _ensure_session_columns(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE research_sessions ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
         )
+    if "deadline" not in columns:
+        connection.execute("ALTER TABLE research_sessions ADD COLUMN deadline TEXT NOT NULL DEFAULT ''")
 
 
 def _now() -> str:

@@ -1,9 +1,11 @@
 """Run one approved research tool or a validated research action."""
 
+import threading
 from dataclasses import replace
 
 from app.research.contracts import ActionOutcome, ActionRequest, ResearchState
 from app.research.cycle import CycleResult, run_cycle
+from app.research.pool import BoundedWorkerPool
 from app.research.dispatcher import ActionDispatcher
 from app.research.graph import EvidenceGraph
 from app.research.guardrails import GuardrailPolicy, ResearchGuardrails
@@ -55,6 +57,8 @@ class ResearchWorker:
             observer=self.observer,
         )
         self._dispatcher.observer = self.observer
+        self._cycle_lock = threading.Lock()
+        self.pool = BoundedWorkerPool(1)
 
     def execute(self, tool: str, query: str, context: ToolContext) -> ToolResult:
         with timed() as clock:
@@ -86,20 +90,25 @@ class ResearchWorker:
         on_progress=None,
         halt_after: int | None = None,
         should_cancel=None,
+        deadline: str = "",
+        pool: BoundedWorkerPool | None = None,
     ) -> CycleResult:
-        if self.graph is not None:
-            self.graph.clear()
-        result = run_cycle(
-            self._dispatcher,
-            question,
-            state=state if state is not None else ResearchState(),
-            user_id=user_id,
-            top_k=top_k,
-            on_progress=on_progress,
-            halt_after=halt_after,
-            should_cancel=should_cancel,
-        )
-        return replace(result, graph=self.graph)
+        with self._cycle_lock:
+            if self.graph is not None:
+                self.graph.clear()
+            result = run_cycle(
+                self._dispatcher,
+                question,
+                state=state if state is not None else ResearchState(),
+                user_id=user_id,
+                top_k=top_k,
+                on_progress=on_progress,
+                halt_after=halt_after,
+                should_cancel=should_cancel,
+                deadline=deadline,
+                pool=pool if pool is not None else self.pool,
+            )
+            return replace(result, graph=self.graph)
 
     def tools(self) -> tuple[str, ...]:
         return self._registry.names()

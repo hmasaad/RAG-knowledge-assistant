@@ -55,8 +55,8 @@ class ResearchGuardrails:
     def remaining_cost(self, spent: int) -> int:
         return max(0, self.policy.cost_limit() - max(0, spent))
 
-    def should_stop(self, remaining_budget: int) -> bool:
-        return remaining_budget < 1
+    def should_stop(self, remaining_budget: int, spent: int = 0) -> bool:
+        return remaining_budget < 1 or self.remaining_cost(spent) < 1
 
     def check_tool(self, tool: str, context: ToolContext) -> str:
         name = (tool or "").strip()
@@ -64,6 +64,13 @@ class ResearchGuardrails:
             return CALLER_DENIED
         filters = context.filters
         if filters is not None and filters.user_id and filters.user_id != context.user_id:
+            return CALLER_DENIED
+        if (
+            filters is not None
+            and filters.document_ids is not None
+            and context.document_ids is not None
+            and set(filters.document_ids) - context.document_ids
+        ):
             return CALLER_DENIED
         if name in self.policy.denied_tools:
             return TOOL_DENIED.format(name=name)

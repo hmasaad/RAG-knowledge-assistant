@@ -23,6 +23,7 @@
       <button type="button" class="tab is-active" data-tab="library" role="tab">Library</button>
       <button type="button" class="tab" data-tab="ask" role="tab">Ask</button>
       <button type="button" class="tab" data-tab="research" role="tab">Research</button>
+      <button type="button" class="tab" data-tab="engineering" role="tab">Engineering</button>
     </nav>
 
     <main>
@@ -30,10 +31,17 @@
         <form id="upload-form" class="card">
           <h2>Index a document</h2>
           <p class="hint">Markdown, PDF, text, AsciiDoc, or source files. Answers only use what you upload.</p>
-          <label class="file">
-            <input id="file" name="file" type="file" required />
-            <span>Choose file</span>
+          <label>
+            File
+            <input
+              id="file"
+              name="file"
+              type="file"
+              required
+              accept=".md,.markdown,.txt,.text,.pdf,.adoc,.asciidoc,.py,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.sql,.sh"
+            />
           </label>
+          <p id="file-name" class="hint">No file selected.</p>
           <label>
             Visibility
             <select id="visibility" name="visibility">
@@ -105,6 +113,18 @@
           </div>
         </div>
         <article id="research-result" class="card result" hidden></article>
+      </section>
+
+      <section id="panel-engineering" class="panel" role="tabpanel" hidden>
+        <div class="card">
+          <div class="row">
+            <h2>Evaluation dashboard</h2>
+            <button type="button" id="refresh-engineering" class="ghost">Refresh</button>
+          </div>
+          <p class="hint">Success rate, failure categories, duration, token usage, estimated cost, and recovery by agent version.</p>
+          <div id="engineering-versions" class="list"></div>
+          <ul id="engineering-runs" class="list"></ul>
+        </div>
       </section>
     </main>
     <script src="/ui/app.js"></script>

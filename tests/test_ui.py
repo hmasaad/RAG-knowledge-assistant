@@ -13,5 +13,9 @@ def test_home_page_is_the_assistant_ui(client: TestClient) -> None:
     assert "Research agent" in page.text
     assert "Stop after the first committed step" in page.text
     assert "Library" in page.text
+    assert "Engineering" in page.text
+    assert "Evaluation dashboard" in page.text
+    assert "uvicorn app.main:app" in script.text
+    assert 'id="file-name"' in page.text
     assert styles.status_code == 200
     assert script.status_code == 200

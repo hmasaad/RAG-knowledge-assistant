@@ -22,9 +22,11 @@ document.querySelectorAll(".tab").forEach((tab) => {
 
 document.getElementById("refresh-docs").addEventListener("click", refreshLibrary);
 document.getElementById("refresh-sessions").addEventListener("click", refreshSessions);
+document.getElementById("file").addEventListener("change", showChosenFile);
 document.getElementById("upload-form").addEventListener("submit", uploadDocument);
 document.getElementById("ask-form").addEventListener("submit", askQuestion);
 document.getElementById("research-form").addEventListener("submit", runResearch);
+document.getElementById("refresh-engineering").addEventListener("click", refreshEngineering);
 
 function showTab(name) {
   document.querySelectorAll(".tab").forEach((tab) => {
@@ -35,6 +37,7 @@ function showTab(name) {
     panel.classList.toggle("is-active", active);
     panel.hidden = !active;
   });
+  if (name === "engineering") refreshEngineering().catch(() => {});
 }
 
 function headers(extra = {}) {
@@ -43,10 +46,15 @@ function headers(extra = {}) {
 }
 
 async function request(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: headers(options.headers || {}),
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers: headers(options.headers || {}),
+    });
+  } catch (error) {
+    throw new Error(explainNetwork(error));
+  }
   if (response.status === 204) return null;
   const text = await response.text();
   let body = null;
@@ -56,9 +64,31 @@ async function request(url, options = {}) {
     body = { detail: text };
   }
   if (!response.ok) {
-    throw new Error(body?.detail || `Request failed (${response.status})`);
+    const detail = body?.detail;
+    throw new Error(typeof detail === "string" && detail ? detail : `Request failed (${response.status})`);
   }
   return body;
+}
+
+function explainNetwork(error) {
+  const text = error && error.message ? error.message : String(error || "");
+  if (location.protocol === "file:") {
+    return "Open this page from the running API (uvicorn app.main:app), not as a saved HTML file.";
+  }
+  if (
+    text === "Failed to fetch" ||
+    text === "Load failed" ||
+    text.includes("NetworkError")
+  ) {
+    return "The API did not respond. Start it with uvicorn app.main:app and reload this page.";
+  }
+  return text || "The API did not respond.";
+}
+
+function showChosenFile() {
+  const file = document.getElementById("file").files[0];
+  const label = document.getElementById("file-name");
+  label.textContent = file ? file.name : "No file selected.";
 }
 
 async function refreshHealth() {
@@ -99,23 +129,24 @@ async function refreshLibrary() {
 async function uploadDocument(event) {
   event.preventDefault();
   const file = document.getElementById("file").files[0];
-  if (!file) return;
+  if (!file) {
+    uploadStatus.textContent = "Choose a PDF, Markdown, text, AsciiDoc, or source file.";
+    return;
+  }
   const data = new FormData();
-  data.append("file", file);
+  data.append("file", file, file.name);
   data.append("visibility", document.getElementById("visibility").value);
   uploadStatus.textContent = "Indexing…";
   try {
-    const created = await fetch("/api/documents", {
+    const body = await request("/api/documents", {
       method: "POST",
-      headers: headers(),
       body: data,
     });
-    const body = await created.json();
-    if (!created.ok) throw new Error(body.detail || "Upload failed.");
     uploadStatus.textContent = body.already_indexed
       ? `${body.filename} was already indexed.`
       : `${body.filename} is ${body.status}.`;
     event.target.reset();
+    showChosenFile();
     refreshLibrary();
     refreshHealth();
   } catch (error) {
@@ -296,3 +327,30 @@ refreshLibrary().catch((error) => {
 refreshSessions().catch((error) => {
   sessionsEl.replaceChildren(item(error.message));
 });
+
+async function refreshEngineering() {
+  const versionsEl = document.getElementById("engineering-versions");
+  const runsEl = document.getElementById("engineering-runs");
+  const body = await request("/api/engineering/dashboard");
+  versionsEl.replaceChildren();
+  runsEl.replaceChildren();
+  if (!body.versions.length) {
+    versionsEl.append(item("No engineering runs yet."));
+    return;
+  }
+  body.versions.forEach((row) => {
+    const failures = Object.entries(row.failures || {})
+      .map(([name, count]) => `${name}: ${count}`)
+      .join(", ");
+    versionsEl.append(
+      item(
+        `${row.agent_version || "unknown"} · success ${(row.success_rate * 100).toFixed(0)}% · ${row.runs} runs · ${Math.round(row.duration_ms)} ms · ${row.token_usage} tokens · cost ${row.estimated_cost} · recovered ${row.recovered}${failures ? ` · ${failures}` : ""}`
+      )
+    );
+  });
+  body.runs.forEach((row) => {
+    runsEl.append(
+      item(`${row.run_id} · ${row.outcome} · ${row.failure_class || "ok"} · ${row.recovery}`)
+    );
+  });
+}

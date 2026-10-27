@@ -67,6 +67,44 @@ def test_denied_tools_and_foreign_filters_are_blocked() -> None:
     assert rails.remaining_cost(4) == 12
 
 
+def test_document_filters_outside_the_caller_scope_are_blocked() -> None:
+    rails = ResearchGuardrails()
+    worker = ResearchWorker(ToolRegistry(), guardrails=rails)
+    denied = worker.execute(
+        "knowledge",
+        "retry limit",
+        ToolContext(
+            user_id="ada",
+            filters=SearchFilters(user_id="ada", document_ids=("secret-doc",)),
+            document_ids={"ada-doc"},
+        ),
+    )
+    allowed_scope = worker.execute(
+        "knowledge",
+        "retry limit",
+        ToolContext(
+            user_id="ada",
+            filters=SearchFilters(user_id="ada", document_ids=("ada-doc",)),
+            document_ids={"ada-doc"},
+        ),
+    )
+    spent = decide(
+        LoopState(
+            complete=False,
+            supported=0,
+            gaps=("what is the office wifi password",),
+            unresolved_conflicts=(),
+            remaining_budget=2,
+            spent_cost=16,
+        )
+    )
+
+    assert denied.error == CALLER_DENIED
+    assert allowed_scope.error == "Unknown tool: knowledge."
+    assert spent.action == STOP
+    assert spent.reason == BUDGET_EXHAUSTED
+
+
 def test_denied_actions_and_cost_ceiling_are_blocked() -> None:
     dispatcher = ActionDispatcher(
         [FakeAdapter(SEARCH), FakeAdapter(FILL_GAPS), FakeAdapter(SYNTHESIZE)],

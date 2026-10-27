@@ -93,3 +93,37 @@ def test_cancel_stops_a_queued_job_and_a_running_job(tmp_path: Path) -> None:
     assert listed.json()["sessions"][0]["priority"] == 4
     assert claimed.id == running.session_id
     assert stopped.status == "cancelled"
+
+
+def test_orchestrator_finishes_the_batch_when_one_session_fails(tmp_path: Path) -> None:
+    services = build_services(
+        _background_settings(tmp_path),
+        embedder=LocalEmbedder(dimension=128),
+    )
+    first = services.research.submit_cycle("which file implements the retry logic", priority=2)
+    second = services.research.submit_cycle(
+        "where are timeouts configured",
+        user_id="ada",
+        priority=1,
+    )
+    seen: list[str] = []
+
+    def boom(session_id: str, *, claimed: bool = False, **_kwargs):
+        seen.append(session_id)
+        if session_id == first.session_id:
+            raise RuntimeError("adapter exploded")
+
+    services.research._jobs._run_session = boom
+    processed = services.research.process_available()
+    stored = services.research._sessions.get(first.session_id)
+    metrics = services.metrics
+
+    assert processed == 2
+    assert seen == [first.session_id, second.session_id]
+    assert stored is not None
+    assert stored.status == "failed"
+    assert "adapter exploded" in (stored.error or "")
+    assert metrics.value("rag_research_jobs_claimed_total", priority="2") == 1
+    assert metrics.value("rag_research_jobs_claimed_total", priority="1") == 1
+    assert metrics.value("rag_research_jobs_finished_total", status="failed") == 1
+    assert metrics.summary("rag_research_jobs_queue_wait_seconds", priority="2")[1] == 1

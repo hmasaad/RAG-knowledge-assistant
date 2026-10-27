@@ -4,5 +4,10 @@
   "known_answer": 1.0,
   "claim_accuracy": 1.0,
   "contradiction_accuracy": 1.0,
-  "search_contract": 1.0
+  "search_contract": 1.0,
+  "evidence_backed": 1.0,
+  "budget_respect": 1.0,
+  "recovery": 1.0,
+  "refusal_accuracy": 1.0,
+  "security_respect": 1.0
 }

@@ -336,6 +336,18 @@ class ResearchResponse(BaseModel):
     quality_action: str = "stop"
     quality_reason: str = ""
     quality_failures: list[str] = []
+    quality_claims: list["QualityClaimResponse"] = []
+    quality_confident: bool = True
+
+
+class QualityClaimResponse(BaseModel):
+    claim: str
+    marker: int
+    citation_exists: bool
+    supports: bool
+    support_ratio: float
+    filename: str = ""
+    failures: list[str] = []
 
 
 class SideEffectResponse(BaseModel):

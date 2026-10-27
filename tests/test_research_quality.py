@@ -11,10 +11,12 @@ from app.research.quality import (
     CONFLICTING_EVIDENCE,
     CRITERIA,
     INCOMPLETE_ANSWER,
+    INSUFFICIENT_REASON,
     MISSING_EVIDENCE,
     STALE_SOURCE,
     UNSUPPORTED_CLAIM,
     ResearchQualitySpec,
+    apply_quality_gate,
     evaluate_research,
     recommend_research,
     score_research,
@@ -65,6 +67,35 @@ def test_completed_workflow_is_not_reliable_when_the_report_is_wrong() -> None:
     assert UNSUPPORTED_CLAIM in score.failures
     assert INCOMPLETE_ANSWER in score.failures
     assert score.recommendation == REVERIFY
+
+
+def test_quality_gate_refuses_when_claims_are_not_grounded() -> None:
+    report = SimpleNamespace(
+        report="The office wifi password is hunter2. [1]",
+        citations=[
+            SimpleNamespace(
+                filename="api-errors.md",
+                quote="The file that implements retry logic is app/http/retry.py.",
+            )
+        ],
+        sufficient_evidence=True,
+        gaps=(),
+        conflict=False,
+        contradictions=(),
+        action="research",
+        decision="report",
+        passages=["kept"],
+    )
+    apply_quality_gate(report)
+
+    assert report.quality_confident is False
+    assert report.report == REFUSAL_TEXT
+    assert report.sufficient_evidence is False
+    assert report.action == "refuse"
+    assert report.decision == "stop"
+    assert report.quality_reason == INSUFFICIENT_REASON
+    assert report.quality_claims[0].supports is False
+    assert report.citations == []
 
 
 def test_refusal_with_a_gap_is_reliable_when_nothing_was_answerable() -> None:

@@ -1,13 +1,11 @@
 """Run question → retrieve → verify → fill gaps → retrieve → synthesize."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from app.generation.agent import reformulate
 from app.research.adapters import cited_answer
 from app.research.contracts import (
-    FILL_GAPS,
-    REVERIFY,
-    SEARCH,
     SYNTHESIZE,
     ActionOutcome,
     ActionRequest,
@@ -15,8 +13,9 @@ from app.research.contracts import (
     EvidenceRef,
     ResearchState,
 )
-from app.research.planner import subquestions
+from app.research.dag import ResearchDag, build_search_dag, extend_gap_dag
 from app.research.dispatcher import ActionDispatcher
+from app.research.pool import BoundedWorkerPool
 
 
 class CycleHalted(Exception):
@@ -32,6 +31,14 @@ class CycleCancelled(Exception):
 
     def __init__(self, result: "CycleResult") -> None:
         super().__init__("Cancelled.")
+        self.result = result
+
+
+class CycleDeadline(Exception):
+    """Stop because the session or task deadline has passed."""
+
+    def __init__(self, result: "CycleResult") -> None:
+        super().__init__("Deadline exceeded.")
         self.result = result
 
 
@@ -60,46 +67,94 @@ def run_cycle(
     on_progress=None,
     halt_after: int | None = None,
     should_cancel=None,
+    deadline: str = "",
+    pool: BoundedWorkerPool | None = None,
 ) -> CycleResult:
     """Retrieve, verify, fill gaps, retrieve again, then cite an answer.
 
-    Already-executed actions on ``state`` are skipped so a persisted session
-    can resume after a crash or a background worker restart.
+    Actions come from a DAG. Already-done nodes and executed fingerprints are
+    skipped so a persisted session can resume after a crash or a restart.
     """
     session = state if state is not None else ResearchState()
     asked = question.strip()
+    workers = pool if pool is not None else BoundedWorkerPool(1)
+    dag = ResearchDag.from_payload(session.dag)
+    dag.recover()
+    dag.expire_due(_now())
+    if not dag.tasks:
+        dag = build_search_dag(asked, user_id=user_id, top_k=top_k, deadline=deadline)
+    session.dag = dag.to_payload()
     ran = 0
 
-    def step(request: ActionRequest) -> None:
+    def step(request: ActionRequest, task_id: str = "") -> None:
         nonlocal ran
         if should_cancel is not None and should_cancel():
             raise CycleCancelled(_cycle_snapshot(asked, session))
+        if deadline and _now() >= deadline:
+            if task_id:
+                dag.mark_expired(task_id)
+                session.dag = dag.to_payload()
+            raise CycleDeadline(_cycle_snapshot(asked, session))
+        if task_id:
+            dag.mark_running(task_id)
+            session.dag = dag.to_payload()
+            if on_progress is not None:
+                try:
+                    on_progress(session)
+                except TypeError:
+                    pass
         if _step(dispatcher, session, request, on_progress=on_progress) is None:
+            if task_id:
+                dag.mark_done(task_id)
+                session.dag = dag.to_payload()
             return
+        if task_id:
+            dag.mark_done(task_id)
+            session.dag = dag.to_payload()
         ran += 1
         if should_cancel is not None and should_cancel():
             raise CycleCancelled(_cycle_snapshot(asked, session))
+        if deadline and _now() >= deadline:
+            raise CycleDeadline(_cycle_snapshot(asked, session))
         if halt_after is not None and ran >= halt_after:
             raise CycleHalted(_cycle_snapshot(asked, session))
 
-    for clause in subquestions(asked):
-        step(ActionRequest(SEARCH, query=clause, user_id=user_id, top_k=top_k))
-        step(ActionRequest(REVERIFY, claim=clause, user_id=user_id, top_k=top_k))
-    for gap in tuple(session.gaps):
-        alternative = reformulate(gap) or gap
-        step(ActionRequest(FILL_GAPS, query=alternative, user_id=user_id, top_k=top_k))
-        step(
-            ActionRequest(
-                REVERIFY,
-                query=alternative,
-                claim=gap,
-                user_id=user_id,
-                top_k=top_k,
-            )
+    _drain(dag, session, asked, step, workers)
+    if "synthesize" not in dag.tasks:
+        alternatives = tuple(reformulate(gap) or gap for gap in session.gaps)
+        extend_gap_dag(
+            dag,
+            tuple(session.gaps),
+            user_id=user_id,
+            top_k=top_k,
+            deadline=deadline,
+            alternatives=alternatives,
         )
-    report = cited_answer(asked, session)
-    step(ActionRequest(SYNTHESIZE, query=report, user_id=user_id, top_k=top_k))
+        session.dag = dag.to_payload()
+        _drain(dag, session, asked, step, workers)
     return _cycle_snapshot(asked, session)
+
+
+def _drain(
+    dag: ResearchDag,
+    session: ResearchState,
+    asked: str,
+    step,
+    pool: BoundedWorkerPool,
+) -> None:
+    while True:
+        task = dag.next_ready()
+        if task is None:
+            return
+        request = task.request()
+        if task.action == SYNTHESIZE and not request.query.strip():
+            request = ActionRequest(
+                SYNTHESIZE,
+                query=cited_answer(asked, session),
+                user_id=task.user_id,
+                top_k=task.top_k,
+            )
+        pool.map((task,), lambda item, req=request: step(req, item.id))
 
 
 def _cycle_snapshot(asked: str, session: ResearchState) -> CycleResult:
@@ -136,3 +191,7 @@ def _step(
         except TypeError:
             on_progress(state)
     return outcome
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()

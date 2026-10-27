@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.research.loop import PROBE_CONFLICT, REPORT, RETRY, STOP, LoopState, decide
+from app.research.quality import INSUFFICIENT_REASON, MISSING_EVIDENCE
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,6 +73,19 @@ def test_loop_retries_a_gap_and_probes_a_one_sided_conflict() -> None:
     assert probe.action == PROBE_CONFLICT
     assert costly.action == REPORT
     assert "not worth" in costly.reason
+    insufficient = decide(
+        LoopState(
+            complete=False,
+            supported=0,
+            gaps=("what is the office wifi password",),
+            unresolved_conflicts=(),
+            remaining_budget=3,
+            gap_retries=1,
+            quality_failures=(MISSING_EVIDENCE,),
+        )
+    )
+    assert insufficient.action == STOP
+    assert insufficient.reason == INSUFFICIENT_REASON
 
 
 def test_research_records_the_adaptive_decision(client: TestClient) -> None:
@@ -96,6 +110,8 @@ def test_research_records_the_adaptive_decision(client: TestClient) -> None:
 
     assert complete["decision"] == "report"
     assert complete["decisions"] == ["report"]
+    assert complete["quality_confident"] is True
+    assert complete["quality_claims"]
     assert complete["remaining_budget"] >= 0
     assert decide_steps
     assert partial["decision"] in {"report", "retry", "stop"}
