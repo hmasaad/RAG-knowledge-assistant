@@ -1,7 +1,7 @@
 """The autonomous planner generates, revises, and tightens research DAGs."""
 
 from app.research.autonomous import AutonomousPlanner
-from app.research.contracts import FILL_GAPS, SEARCH
+from app.research.contracts import FILL_GAPS, RESOLVE_CONTRADICTIONS, SEARCH, ClaimVerdict, ResearchState
 from app.research.guardrails import GuardrailPolicy, ResearchGuardrails
 from fastapi.testclient import TestClient
 
@@ -74,6 +74,39 @@ def test_optimize_drops_denied_actions_and_repeat_fingerprints() -> None:
         if revised.dag.tasks[task_id].status == "pending"
         and revised.dag.tasks[task_id].query.casefold() == "which file implements the retry logic"
     }
+
+
+def test_replan_adds_gap_work_and_drops_it_when_evidence_arrives() -> None:
+    planner = AutonomousPlanner()
+    plan = planner.generate("which file implements the retry logic", budget=8)
+    plan.dag.mark_done("search:0")
+    plan.dag.mark_done("reverify:0")
+    missing = ResearchState(gaps=["what is the office wifi password"])
+    grown = planner.replan(plan, state=missing, remaining_budget=4, spent_cost=1)
+    assert FILL_GAPS in grown.actions()
+    assert "synthesize" in grown.dag.tasks
+
+    filled = ResearchState(
+        verdicts=[ClaimVerdict("what is the office wifi password", "supported", ("e1",))],
+    )
+    trimmed = planner.replan(grown, state=filled, remaining_budget=3, spent_cost=2)
+    assert FILL_GAPS not in {
+        trimmed.dag.tasks[task_id].action
+        for task_id in trimmed.dag.order
+        if trimmed.dag.tasks[task_id].status == "pending"
+    }
+
+
+def test_replan_adds_a_resolve_step_when_contradictions_appear() -> None:
+    planner = AutonomousPlanner()
+    plan = planner.generate("what is the retry limit", budget=8)
+    plan.dag.mark_done("search:0")
+    plan.dag.mark_done("reverify:0")
+    conflicted = ResearchState(contradictions=["retry-limit-three.md states 3; retry-limit-five.md states 5"])
+    revised = planner.replan(plan, state=conflicted, remaining_budget=4, spent_cost=1)
+
+    assert RESOLVE_CONTRADICTIONS in revised.actions()
+    assert revised.dag.tasks["resolve:1"].depends_on
 
 
 def test_plan_endpoint_returns_the_generated_dag(client: TestClient) -> None:

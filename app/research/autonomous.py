@@ -163,6 +163,8 @@ class AutonomousPlanner:
                     user_id=user_id,
                     top_k=top_k,
                     deadline=deadline,
+                    agent_id="referee",
+                    role="referee",
                 ),
             )
             plan.revisions.append(quality_reason or "Resolve a documented contradiction.")
@@ -179,6 +181,8 @@ class AutonomousPlanner:
                     user_id=user_id,
                     top_k=top_k,
                     deadline=deadline,
+                    agent_id=f"verifier:plan:{plan.version}",
+                    role="verifier",
                 ),
             )
             plan.revisions.append(quality_reason or "Reverify an unsupported claim.")
@@ -193,6 +197,43 @@ class AutonomousPlanner:
             executed=done,
             remaining_budget=remaining_budget,
             spent_cost=spent_cost,
+        )
+
+    def replan(
+        self,
+        plan: AutonomousPlan,
+        *,
+        state: ResearchState,
+        remaining_budget: int,
+        spent_cost: int = 0,
+        user_id: str = "local",
+        top_k: int = 4,
+        deadline: str = "",
+    ) -> AutonomousPlan:
+        """Grow or shrink the DAG from evidence gathered so far."""
+        pruned = self._prune_stale(plan, state)
+        action = _revise_action(state, self.strategy)
+        if self.guardrails.should_stop(remaining_budget, spent_cost):
+            action = "stop"
+        if not pruned and not self._needs_extension(plan, action, state) and "synthesize" in plan.dag.tasks:
+            return self.optimize(
+                plan,
+                executed=set(state.executed),
+                remaining_budget=remaining_budget,
+                spent_cost=spent_cost,
+            )
+        return self.revise(
+            plan,
+            quality_action=action,
+            quality_reason=_replan_reason(action, state),
+            gaps=tuple(gap for gap in state.gaps if not _gap_covered(gap, _covered_fills(plan))),
+            conflicts=tuple(state.contradictions),
+            executed=set(state.executed),
+            remaining_budget=remaining_budget,
+            spent_cost=spent_cost,
+            user_id=user_id,
+            top_k=top_k,
+            deadline=deadline,
         )
 
     def optimize(
@@ -236,18 +277,21 @@ class AutonomousPlanner:
         kept_ids = {task.id for task in kept}
         last = ""
         rebuilt: list[DagTask] = []
+        pending_synth: DagTask | None = None
         for task in kept:
-            if task.status == "pending" and task.action != SYNTHESIZE:
+            if task.action == SYNTHESIZE and task.status == "pending":
+                pending_synth = task
+                continue
+            if task.status == "pending":
                 if any(parent not in kept_ids for parent in task.depends_on):
                     continue
                 last = task.id
                 rebuilt.append(task)
                 continue
-            if task.action == SYNTHESIZE and task.status == "pending":
-                rebuilt.append(replace(task, depends_on=(last,) if last else ()))
-                continue
             last = task.id
             rebuilt.append(task)
+        if pending_synth is not None:
+            rebuilt.append(replace(pending_synth, depends_on=(last,) if last else ()))
         plan.dag = ResearchDag()
         for task in rebuilt:
             plan.dag.add(task)
@@ -271,6 +315,8 @@ class AutonomousPlanner:
                 user_id=user_id,
                 top_k=top_k,
                 deadline=deadline,
+                agent_id="synthesizer",
+                role="synthesizer",
             )
         )
 
@@ -283,3 +329,101 @@ class AutonomousPlanner:
         if not dag.order:
             return ()
         return (dag.order[-1],)
+
+    def _prune_stale(self, plan: AutonomousPlan, state: ResearchState) -> bool:
+        gaps = {gap.casefold() for gap in state.gaps}
+        supported = {
+            verdict.claim.casefold()
+            for verdict in state.verdicts
+            if verdict.verdict == "supported"
+        }
+        kept: list[DagTask] = []
+        removed = False
+        for task_id in plan.dag.order:
+            task = plan.dag.tasks[task_id]
+            if task.status != "pending" or _initial_wave(task):
+                kept.append(task)
+                continue
+            if task.action == FILL_GAPS and (task.claim or task.query).casefold() not in gaps:
+                removed = True
+                continue
+            if task.action == RESOLVE_CONTRADICTIONS and not state.contradictions:
+                removed = True
+                continue
+            if task.id.startswith("reverify:plan:") and task.claim.casefold() in supported:
+                removed = True
+                continue
+            kept.append(task)
+        if not removed:
+            return False
+        plan.dag = ResearchDag()
+        for task in kept:
+            plan.dag.add(task)
+        return True
+
+    def _needs_extension(self, plan: AutonomousPlan, action: str, state: ResearchState) -> bool:
+        if action == FILL_GAPS:
+            covered = _covered_fills(plan)
+            return any(not _gap_covered(gap, covered) for gap in state.gaps)
+        if action == RESOLVE_CONTRADICTIONS:
+            return bool(state.contradictions) and not any(
+                task.action == RESOLVE_CONTRADICTIONS for task in plan.dag.tasks.values()
+            )
+        if action == REVERIFY:
+            claim = (state.gaps[0] if state.gaps else plan.question).casefold()
+            return not any(
+                task.action == REVERIFY and task.claim.casefold() == claim
+                for task in plan.dag.tasks.values()
+            )
+        return False
+
+
+def _revise_action(state: ResearchState, strategy: StrategyMemory | None) -> str:
+    if state.contradictions:
+        fallback = RESOLVE_CONTRADICTIONS
+    elif state.gaps:
+        fallback = FILL_GAPS
+    else:
+        fallback = "stop"
+    if strategy is None:
+        return fallback
+    return strategy.recommend(classify_situation(gaps=state.gaps, conflicts=state.contradictions), fallback)
+
+
+def _replan_reason(action: str, state: ResearchState) -> str:
+    if action == FILL_GAPS:
+        return "Evidence is still missing; the DAG adds a gap fill."
+    if action == RESOLVE_CONTRADICTIONS:
+        return "New contradictions require a resolve step."
+    if action == REVERIFY:
+        return "A claim still needs verification."
+    return "Evidence is sufficient to synthesize."
+
+
+def _covered_fills(plan: AutonomousPlan) -> set[str]:
+    covered: set[str] = set()
+    for task in plan.dag.tasks.values():
+        if task.action != FILL_GAPS:
+            continue
+        for value in (task.claim, task.query):
+            key = value.strip().casefold()
+            if key:
+                covered.add(key)
+            alternative = reformulate(value)
+            if alternative:
+                covered.add(alternative.casefold())
+    return covered
+
+
+def _gap_covered(gap: str, covered: set[str]) -> bool:
+    key = gap.strip().casefold()
+    if key in covered:
+        return True
+    alternative = reformulate(gap)
+    return bool(alternative and alternative.casefold() in covered)
+
+
+def _initial_wave(task: DagTask) -> bool:
+    if task.action == SEARCH and task.id.startswith("search:"):
+        return True
+    return task.action == REVERIFY and task.id.startswith("reverify:") and ":gap:" not in task.id and ":plan:" not in task.id

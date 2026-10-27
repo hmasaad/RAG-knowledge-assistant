@@ -3,7 +3,16 @@
 from dataclasses import asdict, dataclass
 from itertools import combinations
 
-from app.research.contracts import RESOLVE_CONTRADICTIONS, REVERIFY, SEARCH, SYNTHESIZE
+from app.research.adapters import cited_answer
+from app.research.contracts import (
+    RESOLVE_CONTRADICTIONS,
+    REVERIFY,
+    SEARCH,
+    SYNTHESIZE,
+    ActionOutcome,
+    ActionRequest,
+    ResearchState,
+)
 from app.research.planner import ResearchPlan, build_plan
 from app.research.verification import Contradiction
 from app.retrieval.conflicts import numeric_facts
@@ -108,6 +117,18 @@ class CoordinationReport:
             "consensus": list(self.consensus),
             "resolved": self.resolved,
         }
+
+    @classmethod
+    def from_payload(cls, payload: dict | None) -> "CoordinationReport":
+        data = payload or {}
+        return cls(
+            question=str(data.get("question", "")),
+            assignments=tuple(AgentAssignment(**_assignment(item)) for item in data.get("assignments", ()) or ()),
+            findings=tuple(finding_from_payload(item) for item in data.get("findings", ()) or ()),
+            resolutions=tuple(_resolution(item) for item in data.get("resolutions", ()) or ()),
+            consensus=tuple(str(item) for item in data.get("consensus", ()) or ()),
+            resolved=bool(data.get("resolved", True)),
+        )
 
 
 class ConflictReferee:
@@ -236,6 +257,89 @@ class MultiAgentCoordinator:
             resolved=all(item.decision != UNRESOLVED for item in resolutions),
         )
 
+    def publish(self, state: ResearchState, outcome: ActionOutcome, *, agent_id: str, role: str) -> None:
+        """Write this specialist's evidence onto the shared board."""
+        for item in outcome.evidence:
+            finding = AgentFinding(
+                agent_id=agent_id,
+                role=role or SEARCHER,
+                claim=item.text,
+                verdict="supported",
+                source=item.source,
+                values=tuple(sorted(numeric_facts(item.text))),
+                evidence_ids=(item.evidence_id,),
+            )
+            payload = finding.to_payload()
+            if payload not in state.findings:
+                state.findings.append(payload)
+        for verdict in outcome.verdicts:
+            finding = AgentFinding(
+                agent_id=agent_id,
+                role=role or VERIFIER,
+                claim=verdict.claim,
+                verdict=verdict.verdict,
+                values=tuple(sorted(numeric_facts(verdict.claim))),
+                evidence_ids=verdict.evidence_ids,
+            )
+            payload = finding.to_payload()
+            if payload not in state.findings:
+                state.findings.append(payload)
+
+    def settle(self, state: ResearchState, question: str, *, budget: int = 16) -> CoordinationReport:
+        """Resolve the board before a synthesizer writes the answer."""
+        report = self.coordinate(
+            question,
+            findings=findings_from_state(state),
+            budget=budget,
+        )
+        state.coordination = report.to_payload()
+        return report
+
+    def investigate(
+        self,
+        dispatcher,
+        question: str,
+        *,
+        state: ResearchState | None = None,
+        user_id: str = "local",
+        top_k: int = 4,
+        budget: int | None = None,
+    ) -> tuple[ResearchState, CoordinationReport]:
+        """Run searchers and verifiers on one board, then settle before synthesize."""
+        session = state if state is not None else ResearchState()
+        limit = budget if budget is not None else getattr(dispatcher, "budget", 16)
+        for assignment in self.assign(build_plan(question, budget=limit)):
+            if assignment.action == SYNTHESIZE:
+                self.settle(session, question, budget=limit)
+                request = ActionRequest(
+                    SYNTHESIZE,
+                    query=cited_answer(question, session),
+                    user_id=user_id,
+                    top_k=top_k,
+                )
+            elif assignment.action == REVERIFY:
+                request = ActionRequest(REVERIFY, claim=assignment.query, user_id=user_id, top_k=top_k)
+            else:
+                request = ActionRequest(assignment.action, query=assignment.query, user_id=user_id, top_k=top_k)
+            if session.fingerprint(request) in session.executed:
+                continue
+            outcome = dispatcher.dispatch(request, session)
+            session.steps.append(assignment.action)
+            self.publish(session, outcome, agent_id=assignment.agent_id, role=assignment.role)
+        report = self.settle(session, question, budget=limit)
+        return session, report
+
+
+def findings_from_state(state) -> tuple[AgentFinding, ...]:
+    stored = [
+        finding_from_payload(item)
+        for item in getattr(state, "findings", ()) or []
+        if isinstance(item, dict)
+    ]
+    if stored:
+        return tuple(stored)
+    return findings_from_report(state)
+
 
 def findings_from_report(report) -> tuple[AgentFinding, ...]:
     """Lift stored claims and documented conflicts onto the shared board."""
@@ -358,6 +462,28 @@ def _finding_for(
 
 def _kept(left: AgentFinding | None, right: AgentFinding | None) -> tuple[str, ...]:
     return tuple(item.claim for item in (left, right) if item is not None)
+
+
+def _assignment(payload: dict) -> dict:
+    return {
+        "agent_id": str(payload.get("agent_id", "")),
+        "role": str(payload.get("role", "")),
+        "query": str(payload.get("query", "")),
+        "tool": str(payload.get("tool", "")),
+        "action": str(payload.get("action", "")),
+        "depends_on": tuple(str(item) for item in payload.get("depends_on", ()) or ()),
+    }
+
+
+def _resolution(payload: dict) -> ConflictResolution:
+    return ConflictResolution(
+        decision=str(payload.get("decision", "")),
+        summary=str(payload.get("summary", "")),
+        kept_claims=tuple(str(item) for item in payload.get("kept_claims", ()) or ()),
+        dropped_claims=tuple(str(item) for item in payload.get("dropped_claims", ()) or ()),
+        left_agent=str(payload.get("left_agent", "")),
+        right_agent=str(payload.get("right_agent", "")),
+    )
 
 
 def _unique(values: list[str]) -> tuple[str, ...]:

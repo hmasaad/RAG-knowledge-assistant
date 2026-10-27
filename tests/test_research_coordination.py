@@ -13,6 +13,8 @@ from app.research.coordination import (
     ConflictReferee,
     MultiAgentCoordinator,
 )
+from app.research.dispatcher import ActionDispatcher
+from app.research.mocks import mock_action_adapters
 from app.research.planner import build_plan
 from app.research.verification import Contradiction
 
@@ -133,6 +135,37 @@ def test_research_report_includes_cite_both_coordination(client: TestClient) -> 
     assert coordination["resolved"] is True
     assert any(item["decision"] == CITE_BOTH for item in coordination["resolutions"])
     assert {item["role"] for item in coordination["assignments"]} >= {"searcher", "referee", "synthesizer"}
+
+
+def test_specialists_share_one_board_and_settle_before_synthesize() -> None:
+    dispatcher = ActionDispatcher(mock_action_adapters(), budget=16, max_iterations=8)
+    team = MultiAgentCoordinator()
+    state, report = team.investigate(
+        dispatcher,
+        "which file implements the retry logic and where are timeouts configured",
+    )
+
+    assert [item.role for item in report.assignments].count("searcher") == 2
+    assert state.findings
+    assert {item["role"] for item in state.findings} >= {"searcher", "verifier"}
+    assert SYNTHESIZE in state.steps
+    assert SEARCH in state.steps
+    assert state.steps[-1] == SYNTHESIZE
+    assert report.resolved is True
+    assert state.coordination["resolved"] is True
+
+
+def test_generated_dag_labels_searchers_and_verifiers() -> None:
+    from app.research.autonomous import AutonomousPlanner
+
+    plan = AutonomousPlanner().generate(
+        "which file implements the retry logic and where are timeouts configured",
+        budget=16,
+    )
+
+    assert plan.dag.tasks["search:0"].role == "searcher"
+    assert plan.dag.tasks["reverify:0"].role == "verifier"
+    assert plan.dag.tasks["search:1"].agent_id == "searcher:1"
 
 
 def test_document_conflict_object_is_cited_on_both_sides() -> None:

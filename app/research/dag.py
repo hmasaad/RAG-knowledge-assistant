@@ -32,6 +32,8 @@ class DagTask:
     status: str = PENDING
     deadline: str = ""
     error: str = ""
+    agent_id: str = ""
+    role: str = ""
 
     def request(self) -> ActionRequest:
         return ActionRequest(
@@ -54,6 +56,8 @@ class DagTask:
             "status": self.status,
             "deadline": self.deadline,
             "error": self.error,
+            "agent_id": self.agent_id,
+            "role": self.role,
         }
 
     @classmethod
@@ -69,6 +73,8 @@ class DagTask:
             status=str(payload.get("status", PENDING) or PENDING),
             deadline=str(payload.get("deadline", "") or ""),
             error=str(payload.get("error", "") or ""),
+            agent_id=str(payload.get("agent_id", "") or ""),
+            role=str(payload.get("role", "") or ""),
         )
 
 
@@ -176,6 +182,8 @@ def build_search_dag(
                 user_id=user_id,
                 top_k=top_k,
                 deadline=deadline,
+                agent_id=f"searcher:{index}",
+                role="searcher",
             )
         )
         dag.add(
@@ -187,6 +195,8 @@ def build_search_dag(
                 user_id=user_id,
                 top_k=top_k,
                 deadline=deadline,
+                agent_id=f"verifier:{index}",
+                role="verifier",
             )
         )
         previous = verify_id
@@ -223,6 +233,8 @@ def extend_gap_dag(
                 user_id=user_id,
                 top_k=top_k,
                 deadline=deadline,
+                agent_id=f"searcher:gap:{index}",
+                role="searcher",
             )
         )
         dag.add(
@@ -235,6 +247,8 @@ def extend_gap_dag(
                 user_id=user_id,
                 top_k=top_k,
                 deadline=deadline,
+                agent_id=f"verifier:gap:{index}",
+                role="verifier",
             )
         )
         last = verify_id
@@ -247,6 +261,8 @@ def extend_gap_dag(
                 user_id=user_id,
                 top_k=top_k,
                 deadline=deadline,
+                agent_id="synthesizer",
+                role="synthesizer",
             )
         )
     return dag

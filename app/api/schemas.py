@@ -316,6 +316,8 @@ class PlanTaskResponse(BaseModel):
     query: str = ""
     claim: str = ""
     status: str = "pending"
+    agent_id: str = ""
+    role: str = ""
 
 
 class ResearchPlanResponse(BaseModel):

@@ -60,6 +60,8 @@ def research_plan(
                 query=plan.dag.tasks[task_id].query,
                 claim=plan.dag.tasks[task_id].claim,
                 status=plan.dag.tasks[task_id].status,
+                agent_id=plan.dag.tasks[task_id].agent_id,
+                role=plan.dag.tasks[task_id].role,
             )
             for task_id in plan.dag.order
         ],

@@ -1086,7 +1086,12 @@ def _attach_quality(report: ResearchReport) -> ResearchReport:
     return report
 
 
-def _attach_coordination(report: ResearchReport, *, budget: int) -> ResearchReport:
+def _attach_coordination(report: ResearchReport, *, budget: int, stored: dict | None = None) -> ResearchReport:
+    if stored:
+        from app.research.coordination import CoordinationReport
+
+        report.coordination = CoordinationReport.from_payload(stored)
+        return report
     report.coordination = MultiAgentCoordinator().coordinate(
         report.question,
         findings=findings_from_report(report),
@@ -1327,7 +1332,7 @@ def _cycle_report(
         graph=result.graph if getattr(result, "graph", None) is not None else None,
     )
     _attach_quality(report)
-    return _attach_coordination(report, budget=budget)
+    return _attach_coordination(report, budget=budget, stored=getattr(result, "coordination", None))
 
 
 def _deadline_at(seconds: float) -> str:

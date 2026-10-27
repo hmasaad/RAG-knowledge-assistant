@@ -88,6 +88,8 @@ class ResearchState:
     report: str = ""
     steps: list[str] = field(default_factory=list)
     dag: dict = field(default_factory=dict)
+    findings: list[dict] = field(default_factory=list)
+    coordination: dict = field(default_factory=dict)
 
     def to_payload(self) -> dict:
         return {
@@ -118,6 +120,8 @@ class ResearchState:
             "report": self.report,
             "steps": list(self.steps),
             "dag": dict(self.dag or {}),
+            "findings": [dict(item) for item in self.findings],
+            "coordination": dict(self.coordination or {}),
         }
 
     @classmethod
@@ -156,6 +160,8 @@ class ResearchState:
             report=str(data.get("report", "")),
             steps=list(data.get("steps", [])),
             dag=dict(data.get("dag", {}) or {}),
+            findings=[dict(item) for item in data.get("findings", []) or [] if isinstance(item, dict)],
+            coordination=dict(data.get("coordination", {}) or {}),
         )
 
     def fingerprint(self, request: ActionRequest) -> tuple[str, str, str]:

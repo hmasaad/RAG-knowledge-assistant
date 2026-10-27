@@ -5,8 +5,6 @@ from datetime import datetime, timezone
 
 from app.research.adapters import cited_answer
 from app.research.contracts import (
-    FILL_GAPS,
-    RESOLVE_CONTRADICTIONS,
     SYNTHESIZE,
     ActionOutcome,
     ActionRequest,
@@ -15,8 +13,8 @@ from app.research.contracts import (
     ResearchState,
 )
 from app.research.autonomous import AutonomousPlan, AutonomousPlanner
-from app.research.strategy import StrategyMemory, classify_situation
-from app.research.dag import ResearchDag
+from app.research.coordination import MultiAgentCoordinator
+from app.research.strategy import StrategyMemory
 from app.research.dispatcher import ActionDispatcher
 from app.research.pool import BoundedWorkerPool
 
@@ -58,6 +56,7 @@ class CycleResult:
     cost: int
     action: str
     graph: object | None = None
+    coordination: dict | None = None
 
 
 def run_cycle(
@@ -85,6 +84,7 @@ def run_cycle(
         raise CycleDeadline(_cycle_snapshot(asked, session))
     workers = pool if pool is not None else BoundedWorkerPool(1)
     planner = AutonomousPlanner(dispatcher.guardrails, strategy=strategy)
+    team = MultiAgentCoordinator(denied_actions=dispatcher.guardrails.policy.denied_actions)
     plan = AutonomousPlan.from_payload(session.dag)
     if plan is None:
         plan = planner.generate(
@@ -101,31 +101,50 @@ def run_cycle(
     ran = 0
 
     def step(request: ActionRequest, task_id: str = "") -> None:
-        nonlocal ran
+        nonlocal ran, plan
+        dag = plan.dag
         if should_cancel is not None and should_cancel():
             raise CycleCancelled(_cycle_snapshot(asked, session))
         if deadline and _now() >= deadline:
             if task_id:
                 dag.mark_expired(task_id)
-                session.dag = dag.to_payload()
+                session.dag = plan.to_payload()
             raise CycleDeadline(_cycle_snapshot(asked, session))
         if task_id:
             dag.mark_running(task_id)
-            session.dag = dag.to_payload()
+            session.dag = plan.to_payload()
             if on_progress is not None:
                 try:
                     on_progress(session)
                 except TypeError:
                     pass
-        if _step(dispatcher, session, request, on_progress=on_progress) is None:
+        outcome = _step(dispatcher, session, request, on_progress=on_progress)
+        if outcome is None:
             if task_id:
                 dag.mark_done(task_id)
-                session.dag = dag.to_payload()
+                session.dag = plan.to_payload()
             return
+        task = dag.tasks.get(task_id)
+        team.publish(
+            session,
+            outcome,
+            agent_id=(task.agent_id if task is not None else task_id) or task_id,
+            role=(task.role if task is not None else "") or "",
+        )
         if task_id:
             dag.mark_done(task_id)
-            session.dag = dag.to_payload()
+            session.dag = plan.to_payload()
         ran += 1
+        plan = planner.replan(
+            plan,
+            state=session,
+            remaining_budget=max(0, dispatcher.budget - session.cost),
+            spent_cost=session.cost,
+            user_id=user_id,
+            top_k=top_k,
+            deadline=deadline,
+        )
+        session.dag = plan.to_payload()
         if should_cancel is not None and should_cancel():
             raise CycleCancelled(_cycle_snapshot(asked, session))
         if deadline and _now() >= deadline:
@@ -133,47 +152,47 @@ def run_cycle(
         if halt_after is not None and ran >= halt_after:
             raise CycleHalted(_cycle_snapshot(asked, session))
 
-    _drain(dag, session, asked, step, workers)
-    if "synthesize" not in dag.tasks:
-        plan.dag = dag
-        plan = planner.revise(
+    _drain(plan, session, asked, step, workers, team=team, budget=dispatcher.budget)
+    if plan.dag.next_ready() is None and "synthesize" not in plan.dag.tasks:
+        plan = planner.replan(
             plan,
-            quality_action=_revise_action(session, strategy),
-            quality_reason="",
-            gaps=tuple(session.gaps),
-            conflicts=tuple(session.contradictions),
-            executed=set(session.executed),
+            state=session,
             remaining_budget=max(0, dispatcher.budget - session.cost),
             spent_cost=session.cost,
             user_id=user_id,
             top_k=top_k,
             deadline=deadline,
         )
-        dag = plan.dag
         session.dag = plan.to_payload()
-        _drain(dag, session, asked, step, workers)
+        _drain(plan, session, asked, step, workers, team=team, budget=dispatcher.budget)
+    team.settle(session, asked, budget=dispatcher.budget)
     return _cycle_snapshot(asked, session)
 
 
 def _drain(
-    dag: ResearchDag,
+    plan: AutonomousPlan,
     session: ResearchState,
     asked: str,
     step,
     pool: BoundedWorkerPool,
+    *,
+    team: MultiAgentCoordinator,
+    budget: int,
 ) -> None:
     while True:
-        task = dag.next_ready()
+        task = plan.dag.next_ready()
         if task is None:
             return
         request = task.request()
-        if task.action == SYNTHESIZE and not request.query.strip():
-            request = ActionRequest(
-                SYNTHESIZE,
-                query=cited_answer(asked, session),
-                user_id=task.user_id,
-                top_k=task.top_k,
-            )
+        if task.action == SYNTHESIZE:
+            team.settle(session, asked, budget=budget)
+            if not request.query.strip():
+                request = ActionRequest(
+                    SYNTHESIZE,
+                    query=cited_answer(asked, session),
+                    user_id=task.user_id,
+                    top_k=task.top_k,
+                )
         pool.map((task,), lambda item, req=request: step(req, item.id))
 
 
@@ -191,6 +210,7 @@ def _cycle_snapshot(asked: str, session: ResearchState) -> CycleResult:
         contradictions=tuple(session.contradictions),
         cost=session.cost,
         action=action,
+        coordination=dict(session.coordination) if session.coordination else None,
     )
 
 
@@ -211,21 +231,6 @@ def _step(
         except TypeError:
             on_progress(state)
     return outcome
-
-
-def _revise_action(session: ResearchState, strategy: StrategyMemory | None = None) -> str:
-    if session.contradictions:
-        fallback = RESOLVE_CONTRADICTIONS
-    elif session.gaps:
-        fallback = FILL_GAPS
-    else:
-        fallback = "stop"
-    if strategy is None:
-        return fallback
-    return strategy.recommend(
-        classify_situation(gaps=session.gaps, conflicts=session.contradictions),
-        fallback,
-    )
 
 
 def _now() -> str:
