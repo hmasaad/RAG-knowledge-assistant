@@ -661,6 +661,7 @@ class ResearchService:
         verdicts: tuple[ClaimVerdict, ...] = (),
         evidence: tuple[EvidenceRef, ...] = (),
         pending_actions: tuple[str, ...] = (),
+        remaining_budget: int | None = None,
     ):
         from app.research.evidence_plan import EvidenceDrivenPlanner
 
@@ -670,11 +671,55 @@ class ResearchService:
             verdicts=list(verdicts),
             evidence=list(evidence),
         )
+        budget = self._budget_limit if remaining_budget is None else remaining_budget
         return EvidenceDrivenPlanner().decide(
             state,
             pending_actions=pending_actions,
             strategy=self._strategy,
+            remaining_budget=budget,
         )
+
+    def rank_research_value(
+        self,
+        *,
+        gaps: tuple[str, ...] = (),
+        contradictions: tuple[str, ...] = (),
+        verdicts: tuple[ClaimVerdict, ...] = (),
+        evidence: tuple[EvidenceRef, ...] = (),
+        remaining_budget: int | None = None,
+    ):
+        from app.research.voi import ValueOfInformation
+
+        state = ResearchState(
+            gaps=list(gaps),
+            contradictions=list(contradictions),
+            verdicts=list(verdicts),
+            evidence=list(evidence),
+        )
+        budget = self._budget_limit if remaining_budget is None else remaining_budget
+        return ValueOfInformation().candidates(state, remaining_budget=budget)
+
+    def design_research(
+        self,
+        *,
+        gaps: tuple[str, ...] = (),
+        contradictions: tuple[str, ...] = (),
+        verdicts: tuple[ClaimVerdict, ...] = (),
+        evidence: tuple[EvidenceRef, ...] = (),
+        remaining_budget: int | None = None,
+    ):
+        from app.research.bayes import SequentialDesigner
+        from app.research.voi import ValueOfInformation
+
+        state = ResearchState(
+            gaps=list(gaps),
+            contradictions=list(contradictions),
+            verdicts=list(verdicts),
+            evidence=list(evidence),
+        )
+        budget = self._budget_limit if remaining_budget is None else remaining_budget
+        ranked = ValueOfInformation().candidates(state, remaining_budget=budget)
+        return SequentialDesigner().plan(state, ranked, remaining_budget=budget)
 
     def learn_strategy(self, situation: str, action: str, reward: float) -> StrategyStat:
         return self._strategy.observe(situation, action, reward)
@@ -805,6 +850,7 @@ class ResearchService:
             ],
             "contradictions": list(state.contradictions or session.contradictions),
             "gaps": list(state.gaps or session.gaps),
+            "voi": [dict(item) for item in getattr(state, "voi_log", []) or []],
         }
 
     def resume(self, session_id: str, *, user_id: str | None = None) -> ResearchReport:

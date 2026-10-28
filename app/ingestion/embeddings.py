@@ -9,7 +9,7 @@ import math
 import re
 from typing import Protocol
 
-from app.ingestion.errors import IngestionError
+from app.ingestion.errors import IngestionError, index_failure_message
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 _STOPWORDS = {
@@ -114,7 +114,12 @@ class OpenAIEmbedder:
         vectors: list[list[float]] = []
         for start in range(0, len(texts), self._batch_size):
             batch = texts[start : start + self._batch_size]
-            response = self._client.embeddings.create(model=self.model, input=batch)
+            try:
+                response = self._client.embeddings.create(model=self.model, input=batch)
+            except IngestionError:
+                raise
+            except Exception as exc:
+                raise IngestionError(index_failure_message(exc), status_code=502) from exc
             ordered = sorted(response.data, key=lambda item: item.index)
             if len(ordered) != len(batch):
                 raise IngestionError(

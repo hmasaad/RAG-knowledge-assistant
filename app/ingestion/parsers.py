@@ -41,4 +41,9 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
         ]
     finally:
         document.close()
+    if not pages or not any(page.text.strip() for page in pages):
+        raise IngestionError(
+            "No text could be extracted from the PDF. Image-only or scanned pages are not indexed.",
+            status_code=422,
+        )
     return ParsedDocument(content_type="application/pdf", pages=pages)

@@ -6,7 +6,7 @@ from app.ingestion.chunking import build_chunks
 from app.ingestion.cleaning import clean_text
 from app.ingestion.context import embedding_text, situate
 from app.ingestion.embeddings import Embedder
-from app.ingestion.errors import IngestionError
+from app.ingestion.errors import IngestionError, index_failure_message
 from app.ingestion.graph import GraphEdge, extract_edges
 from app.ingestion.metadata_store import MetadataStore
 from app.ingestion.models import Chunk, DocumentRecord, ParsedPage
@@ -69,7 +69,7 @@ def index_stored_version(
         vectors.add(chunks, embeddings)
     except Exception as exc:
         vectors.delete_version(document_id, version)
-        message = exc.message if isinstance(exc, IngestionError) else "Failed to index the document."
+        message = index_failure_message(exc)
         metadata.mark_version_failed(document_id, version, message)
         log_event(
             "rag.ingestion",

@@ -342,6 +342,23 @@ class EvidencePlanRequest(BaseModel):
     contradictions: list[str] = []
     verdicts: list[EvidenceVerdictRequest] = []
     pending_actions: list[str] = []
+    remaining_budget: int | None = None
+
+
+class ValueCandidateResponse(BaseModel):
+    action: str
+    kind: str
+    target: str
+    gain: float
+    cost: int
+    voi: float
+    calibrated_voi: float = 0.0
+    confidence: float = 1.0
+    reliability: float = 1.0
+    mandatory: bool = False
+    blocked_by: str = ""
+    eig: float = 0.0
+    reason: str = ""
 
 
 class EvidencePlanResponse(BaseModel):
@@ -351,7 +368,25 @@ class EvidencePlanResponse(BaseModel):
     targets: list[str] = []
     severity: str = "none"
     quality: float = 0.0
+    voi: float = 0.0
+    cost: int = 0
+    kind: str = ""
+    candidates: list[ValueCandidateResponse] = []
     signals: dict = {}
+
+
+class ValueSelectionResponse(BaseModel):
+    selected: ValueCandidateResponse | None = None
+    remaining_budget: int = 16
+    candidates: list[ValueCandidateResponse] = []
+
+
+class SequentialDesignResponse(BaseModel):
+    stop: bool
+    reason: str
+    beliefs: dict = {}
+    sequence: list[dict] = []
+    ranked: list[ValueCandidateResponse] = []
 
 
 class AgentAssignmentResponse(BaseModel):
@@ -518,3 +553,4 @@ class SessionAuditResponse(BaseModel):
     verdicts: list[dict] = []
     contradictions: list[str] = []
     gaps: list[str] = []
+    voi: list[dict] = []

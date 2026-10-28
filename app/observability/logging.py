@@ -43,4 +43,10 @@ def configure_logging(level: str = "INFO") -> None:
 
 def log_event(logger_name: str, message: str, **fields: Any) -> None:
     """Write one structured event. ``fields`` become JSON properties."""
-    logging.getLogger(logger_name).info(message, extra=fields)
+    extra: dict[str, Any] = {}
+    for key, value in fields.items():
+        if key in _STANDARD_ATTRS or key.startswith("_"):
+            extra[f"event_{key}"] = value
+        else:
+            extra[key] = value
+    logging.getLogger(logger_name).info(message, extra=extra)

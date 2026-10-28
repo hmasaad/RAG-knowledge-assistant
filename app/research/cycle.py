@@ -18,7 +18,9 @@ from app.research.autonomous import AutonomousPlan, AutonomousPlanner
 from app.research.coordination import MultiAgentCoordinator
 from app.research.strategy import StrategyMemory
 from app.research.dispatcher import ActionDispatcher
+from app.research.evidence_plan import EvidenceDrivenPlanner
 from app.research.pool import BoundedWorkerPool
+from app.research.voi import observe_result
 
 
 class CycleHalted(Exception):
@@ -146,6 +148,7 @@ def run_cycle(
                 return
             session.apply(request, outcome)
             session.steps.append(request.action)
+            observe_result(session, EvidenceDrivenPlanner().inspect(session).quality)
             dispatcher.observer.record_action(
                 request.action,
                 ok=outcome.ok,

@@ -15,6 +15,9 @@ from app.api.schemas import (
     CoordinationResponse,
     EvidencePlanRequest,
     EvidencePlanResponse,
+    SequentialDesignResponse,
+    ValueCandidateResponse,
+    ValueSelectionResponse,
     EvidenceGraphResponse,
     EvidenceResponse,
     GraphEdgeResponse,
@@ -88,6 +91,7 @@ def research_evidence_plan(
             for item in body.verdicts
         ),
         pending_actions=tuple(body.pending_actions),
+        remaining_budget=body.remaining_budget,
     )
     return EvidencePlanResponse(
         action=decision.action,
@@ -96,7 +100,60 @@ def research_evidence_plan(
         targets=list(decision.targets),
         severity=decision.severity,
         quality=decision.quality,
+        voi=decision.voi,
+        cost=decision.cost,
+        kind=decision.kind,
+        candidates=[ValueCandidateResponse(**item) for item in decision.candidates],
         signals=dict(decision.signals),
+    )
+
+
+@router.post("/research/voi", response_model=ValueSelectionResponse)
+def research_value_of_information(
+    body: EvidencePlanRequest,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> ValueSelectionResponse:
+    _ = user_id
+    ranked = services.research.rank_research_value(
+        gaps=tuple(body.gaps),
+        contradictions=tuple(body.contradictions),
+        verdicts=tuple(
+            ClaimVerdict(item.claim, item.verdict, tuple(item.evidence_ids))
+            for item in body.verdicts
+        ),
+        remaining_budget=body.remaining_budget,
+    )
+    selected = ranked[0] if ranked else None
+    return ValueSelectionResponse(
+        selected=ValueCandidateResponse(**selected.to_payload()) if selected else None,
+        remaining_budget=body.remaining_budget if body.remaining_budget is not None else 16,
+        candidates=[ValueCandidateResponse(**item.to_payload()) for item in ranked],
+    )
+
+
+@router.post("/research/design", response_model=SequentialDesignResponse)
+def research_sequential_design(
+    body: EvidencePlanRequest,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> SequentialDesignResponse:
+    _ = user_id
+    designed = services.research.design_research(
+        gaps=tuple(body.gaps),
+        contradictions=tuple(body.contradictions),
+        verdicts=tuple(
+            ClaimVerdict(item.claim, item.verdict, tuple(item.evidence_ids))
+            for item in body.verdicts
+        ),
+        remaining_budget=body.remaining_budget,
+    )
+    return SequentialDesignResponse(
+        stop=designed.stop,
+        reason=designed.reason,
+        beliefs=designed.beliefs.to_payload(),
+        sequence=list(designed.sequence),
+        ranked=[ValueCandidateResponse(**item.to_payload()) for item in designed.ranked],
     )
 
 
@@ -202,6 +259,7 @@ def read_research_session_audit(
         verdicts=list(payload["verdicts"]),
         contradictions=list(payload["contradictions"]),
         gaps=list(payload["gaps"]),
+        voi=list(payload.get("voi", [])),
     )
 
 

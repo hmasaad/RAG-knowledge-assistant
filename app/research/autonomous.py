@@ -225,6 +225,12 @@ class AutonomousPlanner:
             state,
             pending_actions=pending,
             strategy=self.strategy,
+            remaining_budget=remaining_budget,
+            spent_cost=spent_cost or state.cost,
+            iterations=state.iterations,
+            max_iterations=self.guardrails.policy.max_iterations,
+            max_cost=self.guardrails.policy.max_cost,
+            deadline=deadline,
         )
         plan.signals = dict(decision.signals)
         plan.decision = decision.to_payload()

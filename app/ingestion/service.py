@@ -6,7 +6,7 @@ import uuid
 
 from dataclasses import dataclass
 
-from app.ingestion.errors import IngestionError
+from app.ingestion.errors import IngestionError, index_failure_message
 from app.ingestion.indexing import chunks_for_bytes, index_stored_version
 from app.ingestion.metadata_store import MetadataStore
 from app.ingestion.models import DocumentRecord, VersionRecord
@@ -305,7 +305,7 @@ class IngestionService:
                 knowledge_graph=self._knowledge_graph,
             )
         except Exception as exc:
-            message = exc.message if isinstance(exc, IngestionError) else "Failed to index the document."
+            message = index_failure_message(exc)
             self._metadata.finish_job(document_id, version, "failed", message)
             if self._metrics is not None:
                 self._metrics.inc("rag_documents_failed_total")
