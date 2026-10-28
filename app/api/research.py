@@ -13,6 +13,8 @@ from app.api.schemas import (
     ConflictResponse,
     CoordinateRequest,
     CoordinationResponse,
+    EvidencePlanRequest,
+    EvidencePlanResponse,
     EvidenceGraphResponse,
     EvidenceResponse,
     GraphEdgeResponse,
@@ -23,6 +25,8 @@ from app.api.schemas import (
     ResearchResponse,
     ResearchSessionListItem,
     ResearchSessionListResponse,
+    SessionAuditEventResponse,
+    SessionAuditResponse,
     ResearchSubquestionResponse,
     SideEffectResponse,
     StrategyObserveRequest,
@@ -30,6 +34,7 @@ from app.api.schemas import (
     StrategyRecommendResponse,
     StrategyStatResponse,
 )
+from app.research.contracts import ClaimVerdict
 from app.research.coordination import finding_from_payload
 from app.api.search import passage_response
 from app.wiring import Services
@@ -65,6 +70,33 @@ def research_plan(
             )
             for task_id in plan.dag.order
         ],
+    )
+
+
+@router.post("/research/evidence-plan", response_model=EvidencePlanResponse)
+def research_evidence_plan(
+    body: EvidencePlanRequest,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> EvidencePlanResponse:
+    _ = user_id
+    decision = services.research.evidence_decision(
+        gaps=tuple(body.gaps),
+        contradictions=tuple(body.contradictions),
+        verdicts=tuple(
+            ClaimVerdict(item.claim, item.verdict, tuple(item.evidence_ids))
+            for item in body.verdicts
+        ),
+        pending_actions=tuple(body.pending_actions),
+    )
+    return EvidencePlanResponse(
+        action=decision.action,
+        verb=decision.verb,
+        reason=decision.reason,
+        targets=list(decision.targets),
+        severity=decision.severity,
+        quality=decision.quality,
+        signals=dict(decision.signals),
     )
 
 
@@ -150,6 +182,26 @@ def list_research_sessions(
             )
             for session in services.research.list_sessions(user_id=user_id)
         ]
+    )
+
+
+@router.get("/research/sessions/{session_id}/audit", response_model=SessionAuditResponse)
+def read_research_session_audit(
+    session_id: str,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> SessionAuditResponse:
+    payload = services.research.session_audit(session_id, user_id=user_id)
+    return SessionAuditResponse(
+        session_id=payload["session_id"],
+        question=payload["question"],
+        status=payload["status"],
+        plan=list(payload["plan"]),
+        events=[SessionAuditEventResponse(**item) for item in payload["events"]],
+        evidence=list(payload["evidence"]),
+        verdicts=list(payload["verdicts"]),
+        contradictions=list(payload["contradictions"]),
+        gaps=list(payload["gaps"]),
     )
 
 

@@ -174,3 +174,50 @@ def test_completed_session_is_unchanged_after_restart(tmp_path: Path) -> None:
     assert stored.status == "completed"
     assert stored.report == "The retry limit is three. [1]"
     assert stored.sufficient_evidence is True
+
+
+def test_halted_plan_keeps_evidence_and_unresolved_contradictions(tmp_path: Path) -> None:
+    first = _manager(tmp_path)
+    session = first.create(user_id="ada", question="what is the retry limit", top_k=3)
+    request = ActionRequest(SEARCH, query="what is the retry limit")
+    outcome = ActionOutcome(
+        action=SEARCH,
+        ok=True,
+        evidence=(EvidenceRef("e1", "d1", "notes.md", "The retry limit is three attempts."),),
+        provenance=("e1",),
+        cost=1,
+    )
+    state = ResearchState()
+    state.apply(request, outcome)
+    state.steps.append(SEARCH)
+    state.contradictions = ("notes.md says three; guide.md says five",)
+    state.dag = {
+        "tasks": [
+            {"id": "search:0", "action": SEARCH, "status": "done", "depends_on": []},
+            {"id": "reverify:0", "action": REVERIFY, "status": "pending", "depends_on": ["search:0"]},
+            {"id": "synthesize", "action": SYNTHESIZE, "status": "pending", "depends_on": ["reverify:0"]},
+        ]
+    }
+    first.checkpoint(session.id, state, request, outcome)
+    first.halt(
+        session.id,
+        {"action": "halt", "steps": [SEARCH], "contradictions": [], "gaps": []},
+        state,
+    )
+
+    restarted = _manager(tmp_path)
+    stored = restarted.get(session.id)
+    restored = restarted.restore(session.id)
+    events = restarted.action_log(session.id)
+    by_action = {item["action"]: item["status"] for item in restored.dag.get("tasks", [])}
+
+    assert stored is not None
+    assert stored.status == "halted"
+    assert list(stored.contradictions) == ["notes.md says three; guide.md says five"]
+    assert list(restored.contradictions) == ["notes.md says three; guide.md says five"]
+    assert [item.evidence_id for item in restored.evidence] == ["e1"]
+    assert by_action[SEARCH] == "done"
+    assert by_action[REVERIFY] == "pending"
+    assert by_action[SYNTHESIZE] == "pending"
+    assert events[0]["action"] == SEARCH
+    assert events[0]["evidence"][0]["evidence_id"] == "e1"

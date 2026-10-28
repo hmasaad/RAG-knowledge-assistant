@@ -36,6 +36,7 @@ class ResearchWorker:
         denied_tools: frozenset[str] | None = None,
         max_cost: int = 0,
         observer: ResearchObserver | None = None,
+        task_concurrency: int = 2,
     ) -> None:
         self._registry = registry if registry is not None else ToolRegistry()
         self.state = ResearchState()
@@ -58,7 +59,7 @@ class ResearchWorker:
         )
         self._dispatcher.observer = self.observer
         self._cycle_lock = threading.Lock()
-        self.pool = BoundedWorkerPool(1)
+        self.pool = BoundedWorkerPool(task_concurrency)
 
     def execute(self, tool: str, query: str, context: ToolContext) -> ToolResult:
         with timed() as clock:

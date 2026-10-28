@@ -67,8 +67,8 @@ def test_run_cycle_searches_verifies_fills_and_synthesizes() -> None:
 
     assert list(result.steps) == [
         SEARCH,
-        REVERIFY,
         SEARCH,
+        REVERIFY,
         REVERIFY,
         FILL_GAPS,
         REVERIFY,

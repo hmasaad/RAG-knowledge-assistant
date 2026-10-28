@@ -653,6 +653,29 @@ class ResearchService:
             top_k=top_k,
         )
 
+    def evidence_decision(
+        self,
+        *,
+        gaps: tuple[str, ...] = (),
+        contradictions: tuple[str, ...] = (),
+        verdicts: tuple[ClaimVerdict, ...] = (),
+        evidence: tuple[EvidenceRef, ...] = (),
+        pending_actions: tuple[str, ...] = (),
+    ):
+        from app.research.evidence_plan import EvidenceDrivenPlanner
+
+        state = ResearchState(
+            gaps=list(gaps),
+            contradictions=list(contradictions),
+            verdicts=list(verdicts),
+            evidence=list(evidence),
+        )
+        return EvidenceDrivenPlanner().decide(
+            state,
+            pending_actions=pending_actions,
+            strategy=self._strategy,
+        )
+
     def learn_strategy(self, situation: str, action: str, reward: float) -> StrategyStat:
         return self._strategy.observe(situation, action, reward)
 
@@ -752,6 +775,37 @@ class ResearchService:
     def list_sessions(self, *, user_id: str | None = None) -> list[ResearchSession]:
         caller = user_id or self._default_user_id
         return self._sessions.list_for_user(caller)
+
+    def session_audit(self, session_id: str, *, user_id: str | None = None) -> dict:
+        session = self._owned_session(session_id, user_id)
+        state = session.state or ResearchState()
+        plan = state.dag if isinstance(state.dag, dict) else {}
+        return {
+            "session_id": session.id,
+            "question": session.question,
+            "status": session.status,
+            "plan": list(plan.get("tasks", []) or []),
+            "events": self._state.action_log(session.id),
+            "evidence": [
+                {
+                    "evidence_id": item.evidence_id,
+                    "document_id": item.document_id,
+                    "source": item.source,
+                    "text": item.text,
+                }
+                for item in state.evidence
+            ],
+            "verdicts": [
+                {
+                    "claim": item.claim,
+                    "verdict": item.verdict,
+                    "evidence_ids": list(item.evidence_ids),
+                }
+                for item in state.verdicts
+            ],
+            "contradictions": list(state.contradictions or session.contradictions),
+            "gaps": list(state.gaps or session.gaps),
+        }
 
     def resume(self, session_id: str, *, user_id: str | None = None) -> ResearchReport:
         session = self._owned_session(session_id, user_id)
@@ -1217,6 +1271,16 @@ def _pending_report(session: ResearchSession) -> ResearchReport:
     return report
 
 
+def _union(*groups) -> tuple:
+    seen: list = []
+    for group in groups:
+        for item in group or ():
+            if item in seen:
+                continue
+            seen.append(item)
+    return tuple(seen)
+
+
 def _result_payload(result: CycleResult) -> dict:
     return {
         "action": result.action,
@@ -1270,7 +1334,7 @@ def _cycle_result(session: ResearchSession) -> CycleResult:
         gaps=tuple(payload.get("gaps", session.gaps)),
         verdicts=verdicts,
         evidence=evidence,
-        contradictions=tuple(payload.get("contradictions", session.contradictions)),
+        contradictions=_union(payload.get("contradictions"), state.contradictions, session.contradictions),
         cost=int(payload.get("cost", session.cost) or 0),
         action=str(payload.get("action", session.action)),
     )

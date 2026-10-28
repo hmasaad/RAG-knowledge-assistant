@@ -56,7 +56,8 @@ class ActionDispatcher:
                 outcome = ActionOutcome(action=request.action, ok=False, error=error, cost=0)
                 session.errors.append(error)
             else:
-                outcome = self._run(request, session)
+                outcome = self.invoke(request, session)
+                session.apply(request, outcome)
         self.observer.record_action(
             request.action,
             ok=outcome.ok,
@@ -68,24 +69,23 @@ class ActionDispatcher:
             self.observer.record_retry("gap")
         return outcome
 
-    def _run(self, request: ActionRequest, session: ResearchState) -> ActionOutcome:
+    def invoke(self, request: ActionRequest, state: ResearchState | None = None) -> ActionOutcome:
+        """Run the adapter without writing state so a cycle can apply under a lock."""
         adapter = self._adapters[request.action]
         try:
             try:
-                outcome = adapter.run(request, session)
+                return adapter.run(request, state)
             except TypeError:
-                outcome = adapter.run(request)
+                return adapter.run(request)
         except TimeoutError:
-            outcome = ActionOutcome(action=request.action, ok=False, error="Action timed out.", cost=1)
+            return ActionOutcome(action=request.action, ok=False, error="Action timed out.", cost=1)
         except Exception as exc:
-            outcome = ActionOutcome(
+            return ActionOutcome(
                 action=request.action,
                 ok=False,
                 error=str(exc) or type(exc).__name__,
                 cost=1,
             )
-        session.apply(request, outcome)
-        return outcome
 
     def validate(self, request: ActionRequest, state: ResearchState) -> str:
         return self.guardrails.check_action(request, state, adapters=set(self._adapters))

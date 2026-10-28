@@ -13,7 +13,8 @@ def test_planner_generates_search_then_reverify_for_each_clause() -> None:
     )
 
     assert plan.actions() == ("search", "reverify", "search", "reverify")
-    assert plan.dag.tasks["search:1"].depends_on == ("reverify:0",)
+    assert plan.dag.tasks["search:1"].depends_on == ()
+    assert {task.id for task in plan.dag.ready()} == {"search:0", "search:1"}
     assert plan.dag.next_ready() is not None
     assert plan.dag.next_ready().id == "search:0"
     assert plan.version == 1
@@ -106,7 +107,9 @@ def test_replan_adds_a_resolve_step_when_contradictions_appear() -> None:
     revised = planner.replan(plan, state=conflicted, remaining_budget=4, spent_cost=1)
 
     assert RESOLVE_CONTRADICTIONS in revised.actions()
-    assert revised.dag.tasks["resolve:1"].depends_on
+    assert set(revised.dag.tasks["resolve:1"].depends_on) == {"reverify:0"}
+    assert "synthesize" in revised.dag.tasks
+    assert "resolve:1" in revised.dag.tasks["synthesize"].depends_on
 
 
 def test_plan_endpoint_returns_the_generated_dag(client: TestClient) -> None:

@@ -43,9 +43,72 @@ The local embedder is a hashed bag-of-words, and the local answerer quotes the b
 uvicorn app.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000/` to upload documents, ask a grounded question, or run the research agent. The page sends `X-User-Id` with each request and can resume a stored research session.
+Open `http://127.0.0.1:8000/` to upload documents, ask a grounded question, or run the research agent. The page sends `X-User-Id` with each request and can resume a stored research session. The header should show that the API is reachable before you upload. If an upload says `Failed to fetch`, the page is not talking to uvicorn (for example it was opened as a `file://` page).
 
-Index a document, inspect the retrieved passages, then ask a question:
+## Walkthrough
+
+Keep **User id** as `local` unless a step says otherwise. This is the same path anyone can use to interact with the assistant after setup.
+
+### 1. Library: index what you will ask about
+
+1. Open **Library**.
+2. Upload `samples/api-errors.md` as **Shared**.
+3. Confirm it appears under **Documents** as indexed (refresh if it is still queued).
+4. Upload `samples/database.md` as **Shared**.
+5. Upload `evaluation/fixtures/retry-limit-three.md` and `evaluation/fixtures/retry-limit-five.md` as **Shared**. Those two files disagree on the retry limit.
+
+### 2. Ask: a grounded answer from one file
+
+On **Ask**:
+
+| Question | What should happen |
+|---|---|
+| `Which file implements the retry logic?` | The answer names `app/http/retry.py` and cites `api-errors.md`. |
+| `Where are connect and read timeouts configured?` | The answer names `app/http/client.py` and the timeout fields. |
+| `What is the office wifi password?` | The assistant refuses. It does not invent a password. |
+| `help` | The assistant asks which document or topic to search. |
+
+### 3. Research cycle: two independent clauses
+
+On **Research**, choose mode **Cycle**. Leave **Stop after the first committed step** unchecked.
+
+Ask: `Which file implements the retry logic and where are timeouts configured?`
+
+The session should complete. The report cites both `retry.py` and `client.py`. Decisions include two searches (one per clause), then reverify, then synthesize. Refresh **Sessions** and open the same row: the report is still there.
+
+### 4. Halt and resume
+
+Ask the same two-clause question with **Stop after the first committed step** checked.
+
+The session should be `halted`, with only a `search` decision. Resume that session from the list. It should complete without searching the first clause again, and the finished report should still include the evidence from the halted step.
+
+Optional: stop uvicorn after the halt, start it again, and resume. The plan and evidence should still be on disk.
+
+### 5. Contradiction: keep both sides
+
+Ask (Cycle, no halt): `What is the retry limit?`
+
+The report should not pick 3 or 5 and hide the other. Conflicts should name both files. Citations stay visible.
+
+### 6. Gap fill, then refuse if still unsupported
+
+Ask: `Which file implements the retry logic and what is the office wifi password?`
+
+The retry clause is answered and cited. Wifi stays a gap. The unsupported part is refused.
+
+### 7. Catalog and visibility
+
+Ask: `Which documents or files do I have?` You should see the files you uploaded.
+
+Change **User id** to `ada` and ask the retry question again. Private files owned by `local` are not used; shared files still can be. Switch back to `local` and confirm your earlier sessions are still listed.
+
+### 8. Engineering
+
+Open **Engineering** and refresh. The cycles above should appear as runs with a status and duration. A halted or failed run is not marked completed.
+
+The walkthrough passes when uploads index, answers stay cited, two-clause research covers both parts, halt and resume do not redo finished search or mark unfinished work done, contradictions survive, and missing facts stay refused.
+
+Index a document, inspect the retrieved passages, then ask a question from the API:
 
 ```bash
 curl -F "file=@samples/api-errors.md" http://127.0.0.1:8000/api/documents
@@ -80,13 +143,13 @@ INDEXING_MODE=background WORKER_IN_PROCESS=false uvicorn app.main:app
 python -m app.worker
 ```
 
-The API and the worker share `SQLITE_PATH` and `BLOB_PATH`. A local Chroma directory is safe for one process. Set `CHROMA_HOST` when more than one process reads or writes vectors. A job left in `running` longer than `JOB_TIMEOUT_SECONDS` is queued again. Research cycles are scheduled as a DAG: each clause is a search then a reverify, gap fills depend on those verifies, and synthesize is last. A bounded worker pool runs at most `RESEARCH_WORKER_CONCURRENCY` claimed sessions. Interrupted DAG nodes return to pending on recover so a new worker does not repeat finished fingerprints. Each session gets a deadline from `JOB_TIMEOUT_SECONDS`; a queued job past that deadline is failed, and a running cycle stops with `Deadline exceeded.` The production orchestrator claims up to `RESEARCH_WORKER_CONCURRENCY` sessions at once, prefers a higher `priority`, then an earlier deadline, and leaves a user at `RESEARCH_USER_CONCURRENCY` running jobs. A failed session is marked failed and the rest of the claimed batch still runs. `POST /api/research/sessions/{id}/cancel` stops a queued job immediately and stops a running job at the next committed step. Resume puts a cancelled session back on the queue. Claim wait and job outcomes are recorded on `rag_research_jobs_claimed_total`, `rag_research_jobs_queue_wait_seconds`, and `rag_research_jobs_finished_total`.
+The API and the worker share `SQLITE_PATH` and `BLOB_PATH`. A local Chroma directory is safe for one process. Set `CHROMA_HOST` when more than one process reads or writes vectors. A job left in `running` longer than `JOB_TIMEOUT_SECONDS` is queued again. Research cycles are scheduled as a DAG: clause searches are independent, each reverify waits on its search, gap fills wait on that verify wave, and synthesize waits on the remaining leaves. Independent ready tasks run together in a pool of `RESEARCH_TASK_CONCURRENCY` workers, then the planner replans from the new evidence. A failed or expired prerequisite blocks its dependents; a timeout is retried once, then those dependents stay failed. Synthesize still runs from whatever evidence remains. Task status lives in the session snapshot so a crash can restore the same graph. A bounded worker pool runs at most `RESEARCH_WORKER_CONCURRENCY` claimed sessions. Interrupted DAG nodes return to pending on recover so a new worker does not repeat finished fingerprints. Each session gets a deadline from `JOB_TIMEOUT_SECONDS`; a queued job past that deadline is failed, and a running cycle stops with `Deadline exceeded.` The production orchestrator claims up to `RESEARCH_WORKER_CONCURRENCY` sessions at once, prefers a higher `priority`, then an earlier deadline, and leaves a user at `RESEARCH_USER_CONCURRENCY` running jobs. A failed session is marked failed and the rest of the claimed batch still runs. `POST /api/research/sessions/{id}/cancel` stops a queued job immediately and stops a running job at the next committed step. Resume puts a cancelled session back on the queue. Claim wait and job outcomes are recorded on `rag_research_jobs_claimed_total`, `rag_research_jobs_queue_wait_seconds`, and `rag_research_jobs_finished_total`.
 
 Repeated question and passage text is cached. Answers are cached until a document is indexed, deleted, or its visibility changes. Unchanged sections of an updated document reuse the embedding cache, so a new version does not re-embed text that did not change. `GET /health` reports queue depth and the catalog generation. `GET /ready` checks that metadata and vectors can be read. `GET /metrics` exposes counters and timings. Research requests add `rag_research_seconds`, `rag_research_action_seconds`, `rag_research_cost_total`, `rag_research_retries_total`, and `rag_research_failures_total`. The Engineering tab and `GET /api/engineering/dashboard` show success rate, failure categories, duration, token usage, estimated cost, and recovery by run and agent version. `POST /api/engineering/compare` blocks a change when mandatory `safety` or `correctness` scores fall. The continuous improvement loop records a planner version against quality, safety, budget, and recovery scores; `GET /api/engineering/loop` returns the promoted baseline, and `POST /api/engineering/loop/promote` refuses a revision when a mandatory score falls. Production governance sits in front of a live release: `GET /api/engineering/readiness` checks metadata, vectors, guardrails, the hold switch, and those loop floors; `POST /api/engineering/release` promotes a planner version only when the service is ready, the floors hold, and the caller is an approved operator (`X-User-Id` plus `GOVERNANCE_OPERATORS`); `POST /api/engineering/rollback` restores the previous release; and `GET /api/engineering/audit` lists those decisions. Set `GOVERNANCE_HOLD=true` to pause releases without taking the API down. Retries are labeled `search`, `gap`, or `conflict`. Failures are labeled `budget`, `permission`, `timeout`, `invalid`, `duplicate`, `iteration`, or `error`.
 
 Each answer records a trace. The response includes `action` and `trace_id`. `action` is `clarify` when the question does not name a topic, `retry` when a shorter query was required, `answer` when the first search was enough, and `refuse` when the evidence is still missing. Traces persist in `SQLITE_PATH`, so `GET /api/traces/{trace_id}` still works after the API process, a worker, or a resume. Each step has `span_id`, `parent_id`, `duration_ms`, `cost`, `status`, and `error` so a research job can be followed as one distributed trace. The trace also stores the run's quality, cost, and latency (`reliability`, `quality_confident`, `cost`, `duration_ms`). Those measurements stay in place before any increase in worker concurrency.
 
-The autonomous research planner generates a DAG from the question, revises it from quality signals (`fill_gaps`, `reverify`, `resolve_contradictions`, or stop), and drops work that repeats an executed fingerprint, uses a denied action, or would spend the remaining budget. During a cycle the planner replans after each committed step: new gaps or contradictions extend the DAG, and pending fills or resolves disappear when the evidence they needed has arrived. The first search-and-reverify wave for each clause stays in place. `POST /api/research/plan` returns that plan without running it. Guardrails still win: a quality retry is not added when cost or search budget is gone.
+The autonomous research planner generates a DAG from the question, then an evidence-driven planner decides whether to add, remove, reprioritize, or repeat work. It looks at evidence quality (supported verdicts), unresolved claims, contradiction severity (high when two sources give different numbers), and information gaps. High-severity contradictions move ahead of gap fills. Stale fills and resolves are removed when the evidence they needed has arrived. An unsupported claim can be reverified again. The first search-and-reverify wave for each clause stays in place. `POST /api/research/plan` returns the initial DAG without running it. `POST /api/research/evidence-plan` returns the next DAG change from current evidence. Guardrails still win: a quality retry is not added when cost or search budget is gone.
 
 Specialist agents investigate different clauses on one shared evidence board: a searcher and a verifier per clause, then a referee, then a synthesizer. Each agent publishes findings onto that board. The referee settles disagreements before synthesize—citing both supported numeric sides, keeping a supported finding over an unsupported one, or leaving the conflict unresolved. `POST /api/research/coordinate` returns the assignment and resolutions. A cycle runs those specialists through the existing dispatcher, verification, and provenance path.
 
@@ -98,7 +161,7 @@ Strategy learning records whether a revise action helped for a gap, a conflict, 
 
 The research worker starts with mock action adapters. RAG search, claim verification, and the evidence graph are registered one at a time; they are not treated as wired just because the modules exist. `knowledge` searches the collection, `catalog` lists visible documents, and `graph` returns related file paths. An unknown tool is rejected. Catalog and graph lookups do not spend the search budget.
 
-Actions go through a dispatcher that does not depend on a specific model, vector store, or database. The allowed actions are `search`, `fill_gaps`, `resolve_contradictions`, `reverify`, and `synthesize`. Budget and safety guardrails check every tool call and action for remaining cost, an approved tool or action, and a matching caller. A quality recommendation to gather more evidence cannot run when the search budget is gone. `RESEARCH_DENIED_TOOLS` blocks named tools. `RESEARCH_DENIED_ACTIONS` blocks named dispatcher actions. A search that names another caller's document ids is rejected. `RESEARCH_MAX_COST` caps action cost when it is set above zero; otherwise the search budget is the cost ceiling. The loop also stops when spent cost has reached that ceiling. Each action is checked for required inputs, iteration limits, and remaining budget before it runs. The worker then records evidence, verdicts, gaps, provenance, errors, and cost. A repeated action with the same query is rejected. The durable research state manager checkpoints each finished action and the session snapshot in one write, holds a lease while a worker is running, and restores executed fingerprints after a crash, timeout, retry, or restart so the same search is not run again. `halt_after` on `POST /api/research/cycle` stops the cycle after that many newly committed adapter runs and stores the session as `halted`. Restart the process and `POST /api/research/sessions/{id}/resume` continues from that checkpoint. `side_effects` counts how many times each adapter actually ran; a resumed search stays at `1`. `POST /api/research/cycle` runs that sequence and stores a session so a later call can resume from the last finished step. `GET /api/research/sessions/{id}` returns the stored report. `POST /api/research/sessions/{id}/resume` continues a failed or interrupted cycle. A job left in `running` longer than `JOB_TIMEOUT_SECONDS` is queued again.
+Actions go through a dispatcher that does not depend on a specific model, vector store, or database. The allowed actions are `search`, `fill_gaps`, `resolve_contradictions`, `reverify`, and `synthesize`. Budget and safety guardrails check every tool call and action for remaining cost, an approved tool or action, and a matching caller. A quality recommendation to gather more evidence cannot run when the search budget is gone. `RESEARCH_DENIED_TOOLS` blocks named tools. `RESEARCH_DENIED_ACTIONS` blocks named dispatcher actions. A search that names another caller's document ids is rejected. `RESEARCH_MAX_COST` caps action cost when it is set above zero; otherwise the search budget is the cost ceiling. The loop also stops when spent cost has reached that ceiling. Each action is checked for required inputs, iteration limits, and remaining budget before it runs. The worker then records evidence, verdicts, gaps, provenance, errors, and cost. A repeated action with the same query is rejected. The durable research state manager checkpoints each finished action and the session snapshot in one write, holds a lease while a worker is running, and restores executed fingerprints after a crash, timeout, retry, or restart so the same search is not run again. The plan is written before the first adapter runs. Unresolved contradictions stay on the session when a later snapshot omits them. `GET /api/research/sessions/{id}/audit` lists the persisted plan, each tool call, claims, and verification outcomes. `halt_after` on `POST /api/research/cycle` stops the cycle after that many newly committed adapter runs and stores the session as `halted`. Restart the process and `POST /api/research/sessions/{id}/resume` continues from that checkpoint without marking unfinished DAG nodes done. `side_effects` counts how many times each adapter actually ran; a resumed search stays at `1`. `POST /api/research/cycle` runs that sequence and stores a session so a later call can resume from the last finished step. `GET /api/research/sessions/{id}` returns the stored report. `POST /api/research/sessions/{id}/resume` continues a failed or interrupted cycle. A job left in `running` longer than `JOB_TIMEOUT_SECONDS` is queued again.
 
 After the planned searches, an adaptive loop decides whether to retry a gap, probe an unresolved contradiction, or stop. It looks at the quality evaluator's recommendation, open contradictions, missing information, and the remaining search budget. `decision` is `report`, `retry`, `probe_conflict`, or `stop`. The report also includes `quality_action`, `quality_reason`, `quality_failures`, claim-level `quality_claims`, and `quality_confident`. When a published claim is not supported by its citation, the report is replaced by the refusal. The loop stops with that same judgment when it cannot gather more evidence. `RESEARCH_ADAPT_ROUNDS` limits how many extra searches that loop may run.
 
@@ -195,6 +258,7 @@ Indirect prompt injection is stripped before ranking and answering. Private docu
 | `RESEARCH_TIMEOUT_SECONDS` | `30` | Limit for one research search |
 | `RESEARCH_ADAPT_ROUNDS` | `2` | Extra searches after the planned tasks |
 | `RESEARCH_WORKER_CONCURRENCY` | `2` | Research sessions one worker may claim at once |
+| `RESEARCH_TASK_CONCURRENCY` | `2` | Independent DAG tasks one cycle may run at once |
 | `RESEARCH_USER_CONCURRENCY` | `2` | Running research sessions one caller may hold |
 | `RETRIEVAL_CANDIDATES` | `20` | Vector and lexical candidates before fusion |
 | `RRF_K` | `60` | Reciprocal-rank fusion constant |

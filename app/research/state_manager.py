@@ -87,6 +87,9 @@ class DurableResearchStateManager:
     def side_effects(self, session_id: str) -> list[dict]:
         return self.store.list_effects(session_id)
 
+    def action_log(self, session_id: str) -> list[dict]:
+        return self.store.list_actions(session_id)
+
     def complete(self, session_id: str, result: dict, state: ResearchState) -> None:
         self.store.complete(session_id, result, state)
 

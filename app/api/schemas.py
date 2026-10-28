@@ -331,6 +331,29 @@ class ResearchPlanResponse(BaseModel):
     tasks: list[PlanTaskResponse]
 
 
+class EvidenceVerdictRequest(BaseModel):
+    claim: str
+    verdict: str
+    evidence_ids: list[str] = []
+
+
+class EvidencePlanRequest(BaseModel):
+    gaps: list[str] = []
+    contradictions: list[str] = []
+    verdicts: list[EvidenceVerdictRequest] = []
+    pending_actions: list[str] = []
+
+
+class EvidencePlanResponse(BaseModel):
+    action: str
+    verb: str
+    reason: str
+    targets: list[str] = []
+    severity: str = "none"
+    quality: float = 0.0
+    signals: dict = {}
+
+
 class AgentAssignmentResponse(BaseModel):
     agent_id: str
     role: str
@@ -468,3 +491,30 @@ class ResearchSessionListItem(BaseModel):
 
 class ResearchSessionListResponse(BaseModel):
     sessions: list[ResearchSessionListItem]
+
+
+class SessionAuditEventResponse(BaseModel):
+    action: str
+    query: str = ""
+    claim: str = ""
+    fingerprint: str = ""
+    created_at: str = ""
+    ok: bool = True
+    error: str = ""
+    evidence: list[dict] = []
+    verdicts: list[dict] = []
+    gaps: list[str] = []
+    contradictions: list[str] = []
+    cost: int = 0
+
+
+class SessionAuditResponse(BaseModel):
+    session_id: str
+    question: str
+    status: str
+    plan: list[dict] = []
+    events: list[SessionAuditEventResponse] = []
+    evidence: list[dict] = []
+    verdicts: list[dict] = []
+    contradictions: list[str] = []
+    gaps: list[str] = []

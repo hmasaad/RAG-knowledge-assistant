@@ -203,6 +203,7 @@ def build_services(
             graph=evidence_graph,
             guardrails=research_guardrails,
             observer=research_observer,
+            task_concurrency=settings.research_task_concurrency,
         ),
         indexing_mode=settings.indexing_mode,
         job_timeout_seconds=settings.job_timeout_seconds,

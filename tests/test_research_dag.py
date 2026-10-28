@@ -9,6 +9,7 @@ from app.ingestion.embeddings import LocalEmbedder
 from app.research.contracts import SEARCH
 from app.research.dag import (
     DONE,
+    FAILED,
     PENDING,
     RUNNING,
     DagTask,
@@ -30,11 +31,12 @@ def test_search_dag_keeps_reverify_behind_its_search() -> None:
     assert first is not None
     assert first.action == SEARCH
     assert first.id == "search:0"
-    assert [task.id for task in dag.ready()] == ["search:0"]
+    assert [task.id for task in dag.ready()] == ["search:0", "search:1"]
+    assert dag.tasks["reverify:0"].depends_on == ("search:0",)
+    assert dag.tasks["reverify:1"].depends_on == ("search:1",)
 
     dag.mark_done("search:0")
-    assert dag.next_ready() is not None
-    assert dag.next_ready().id == "reverify:0"
+    assert {task.id for task in dag.ready()} == {"search:1", "reverify:0"}
 
 
 def test_dag_recovers_running_nodes_and_skips_finished_work() -> None:
@@ -54,6 +56,95 @@ def test_dag_recovers_running_nodes_and_skips_finished_work() -> None:
     restored.mark_done("search:0")
     assert restored.next_ready().id == "reverify:0"
     assert restored.tasks["search:0"].status == DONE
+
+
+def test_failed_search_blocks_dependents_and_leaves_synthesize_runnable() -> None:
+    dag = build_search_dag(
+        "which file implements the retry logic and where are timeouts configured"
+    )
+    dag.add(DagTask("synthesize", "synthesize", depends_on=("reverify:0", "reverify:1")))
+    dag.mark_failed("search:0", "Action timed out.")
+    restored = ResearchDag.from_payload(dag.to_payload())
+
+    assert dag.tasks["search:0"].status == FAILED
+    assert dag.tasks["reverify:0"].status == FAILED
+    assert "Blocked by failed prerequisite search:0" in dag.tasks["reverify:0"].error
+    assert dag.tasks["search:1"].status == PENDING
+    assert dag.tasks["reverify:1"].status == PENDING
+    assert "reverify:0" not in {task.id for task in dag.ready()}
+    dag.mark_done("search:1")
+    dag.mark_done("reverify:1")
+    assert dag.next_ready() is not None
+    assert dag.next_ready().id == "synthesize"
+    assert restored.tasks["reverify:0"].status == FAILED
+
+
+def test_timeout_is_rescheduled_once_then_blocks_dependents() -> None:
+    from app.research.contracts import ActionOutcome, ActionRequest, ResearchState
+    from app.research.cycle import run_cycle
+    from app.research.dispatcher import ActionDispatcher
+    from app.research.mocks import mock_action_adapters
+
+    class _FlakySearch:
+        action = SEARCH
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, request: ActionRequest, state: ResearchState | None = None) -> ActionOutcome:
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("Action timed out.")
+            return ActionOutcome(action=SEARCH, ok=True, cost=1)
+
+    search = _FlakySearch()
+    adapters = {item.action: item for item in mock_action_adapters()}
+    adapters[SEARCH] = search
+    result = run_cycle(
+        ActionDispatcher(list(adapters.values()), budget=16, max_iterations=8),
+        "which file implements the retry logic",
+    )
+
+    assert search.calls == 2
+    assert result.steps.count(SEARCH) == 2
+
+
+def test_independent_searches_run_in_the_same_wave() -> None:
+    from app.research.contracts import ActionOutcome, ActionRequest, ResearchState
+    from app.research.cycle import run_cycle
+    from app.research.dispatcher import ActionDispatcher
+    from app.research.mocks import mock_action_adapters
+
+    started = threading.Event()
+    lock = threading.Lock()
+    inflight = 0
+    peak = 0
+
+    class _ParallelSearch:
+        action = SEARCH
+
+        def run(self, request: ActionRequest, state: ResearchState | None = None) -> ActionOutcome:
+            nonlocal inflight, peak
+            with lock:
+                inflight += 1
+                peak = max(peak, inflight)
+                if inflight >= 2:
+                    started.set()
+            assert started.wait(timeout=2)
+            with lock:
+                inflight -= 1
+            return ActionOutcome(action=SEARCH, ok=True, cost=1)
+
+    adapters = {item.action: item for item in mock_action_adapters()}
+    adapters[SEARCH] = _ParallelSearch()
+    run_cycle(
+        ActionDispatcher(list(adapters.values()), budget=16, max_iterations=8),
+        "which file implements the retry logic and where are timeouts configured",
+        pool=BoundedWorkerPool(2),
+    )
+
+    assert started.is_set()
+    assert peak == 2
 
 
 def test_bounded_pool_never_exceeds_its_worker_cap() -> None:

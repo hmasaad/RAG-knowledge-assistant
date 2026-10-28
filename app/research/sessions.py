@@ -9,6 +9,15 @@ from pathlib import Path
 
 from app.research.contracts import ActionOutcome, ActionRequest, ResearchState
 
+def _kept(result: dict, key: str, fallback) -> list:
+    seen: list = []
+    for item in list(result.get(key) or []) + list(fallback or ()):
+        if item in seen:
+            continue
+        seen.append(item)
+    return seen
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS research_sessions (
     id TEXT PRIMARY KEY,
@@ -212,6 +221,39 @@ class ResearchSessionStore:
                 ),
             )
 
+    def list_actions(self, session_id: str) -> list[dict]:
+        """Return the action log in the order the worker committed it."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT action, query, claim, outcome_json, created_at, fingerprint
+                FROM research_action_log
+                WHERE session_id = ?
+                ORDER BY created_at, action
+                """,
+                (session_id,),
+            ).fetchall()
+        events: list[dict] = []
+        for row in rows:
+            outcome = _load_json(row["outcome_json"], {})
+            events.append(
+                {
+                    "action": row["action"],
+                    "query": row["query"],
+                    "claim": row["claim"],
+                    "fingerprint": row["fingerprint"],
+                    "created_at": row["created_at"],
+                    "ok": bool(outcome.get("ok", True)),
+                    "error": str(outcome.get("error", "") or ""),
+                    "evidence": list(outcome.get("evidence", []) or []),
+                    "verdicts": list(outcome.get("verdicts", []) or []),
+                    "gaps": list(outcome.get("gaps", []) or []),
+                    "contradictions": list(outcome.get("contradictions", []) or []),
+                    "cost": int(outcome.get("cost", 0) or 0),
+                }
+            )
+        return events
+
     def has_action(self, session_id: str, request: ActionRequest) -> bool:
         with self._connect() as connection:
             row = connection.execute(
@@ -263,9 +305,9 @@ class ResearchSessionStore:
                     str(result.get("action", "halt")),
                     str(result.get("report", state.report)),
                     1 if result.get("sufficient_evidence") else 0,
-                    json.dumps(list(result.get("steps", state.steps))),
-                    json.dumps(list(result.get("gaps", state.gaps))),
-                    json.dumps(list(result.get("contradictions", state.contradictions))),
+                    json.dumps(_kept(result, "steps", state.steps)),
+                    json.dumps(_kept(result, "gaps", state.gaps)),
+                    json.dumps(_kept(result, "contradictions", state.contradictions)),
                     int(result.get("cost", state.cost) or 0),
                     json.dumps(state.to_payload()),
                     json.dumps(result),
@@ -306,9 +348,9 @@ class ResearchSessionStore:
                     str(result.get("action", "")),
                     str(result.get("report", state.report)),
                     1 if result.get("sufficient_evidence") else 0,
-                    json.dumps(list(result.get("steps", state.steps))),
-                    json.dumps(list(result.get("gaps", state.gaps))),
-                    json.dumps(list(result.get("contradictions", state.contradictions))),
+                    json.dumps(_kept(result, "steps", state.steps)),
+                    json.dumps(_kept(result, "gaps", state.gaps)),
+                    json.dumps(_kept(result, "contradictions", state.contradictions)),
                     int(result.get("cost", state.cost) or 0),
                     json.dumps(state.to_payload()),
                     json.dumps(result),
@@ -462,9 +504,9 @@ class ResearchSessionStore:
                     str(result.get("action", "stop")),
                     str(result.get("report", state.report)),
                     1 if result.get("sufficient_evidence") else 0,
-                    json.dumps(list(result.get("steps", state.steps))),
-                    json.dumps(list(result.get("gaps", state.gaps))),
-                    json.dumps(list(result.get("contradictions", state.contradictions))),
+                    json.dumps(_kept(result, "steps", state.steps)),
+                    json.dumps(_kept(result, "gaps", state.gaps)),
+                    json.dumps(_kept(result, "contradictions", state.contradictions)),
                     int(result.get("cost", state.cost) or 0),
                     json.dumps(state.to_payload()),
                     json.dumps(result),

@@ -1,10 +1,12 @@
 """Run question → retrieve → verify → fill gaps → retrieve → synthesize."""
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.research.adapters import cited_answer
 from app.research.contracts import (
+    FILL_GAPS,
     SYNTHESIZE,
     ActionOutcome,
     ActionRequest,
@@ -96,63 +98,124 @@ def run_cycle(
         )
     plan.dag.recover()
     plan.dag.expire_due(_now())
+    plan.dag.propagate_all()
     dag = plan.dag
     session.dag = plan.to_payload()
+    if on_progress is not None:
+        try:
+            on_progress(session)
+        except TypeError:
+            on_progress(session)
     ran = 0
+    lock = threading.Lock()
 
     def step(request: ActionRequest, task_id: str = "") -> None:
-        nonlocal ran, plan
+        nonlocal ran
         dag = plan.dag
-        if should_cancel is not None and should_cancel():
-            raise CycleCancelled(_cycle_snapshot(asked, session))
-        if deadline and _now() >= deadline:
+        with lock:
+            if should_cancel is not None and should_cancel():
+                raise CycleCancelled(_cycle_snapshot(asked, session))
+            if deadline and _now() >= deadline:
+                if task_id:
+                    dag.mark_expired(task_id)
+                    session.dag = plan.to_payload()
+                raise CycleDeadline(_cycle_snapshot(asked, session))
             if task_id:
-                dag.mark_expired(task_id)
+                dag.mark_running(task_id)
                 session.dag = plan.to_payload()
-            raise CycleDeadline(_cycle_snapshot(asked, session))
-        if task_id:
-            dag.mark_running(task_id)
+                if on_progress is not None:
+                    try:
+                        on_progress(session)
+                    except TypeError:
+                        pass
+            if session.fingerprint(request) in session.executed:
+                if task_id:
+                    dag.mark_done(task_id)
+                    session.dag = plan.to_payload()
+                return
+            blocked = dispatcher.validate(request, session)
+        if blocked:
+            outcome = ActionOutcome(action=request.action, ok=False, error=blocked, cost=0)
+        else:
+            outcome = dispatcher.invoke(request, session)
+        with lock:
+            if session.fingerprint(request) in session.executed:
+                if task_id:
+                    dag.mark_done(task_id)
+                    session.dag = plan.to_payload()
+                return
+            session.apply(request, outcome)
+            session.steps.append(request.action)
+            dispatcher.observer.record_action(
+                request.action,
+                ok=outcome.ok,
+                cost=outcome.cost,
+                error=outcome.error,
+            )
+            if not blocked and request.action == FILL_GAPS:
+                dispatcher.observer.record_retry("gap")
+            if on_progress is not None:
+                try:
+                    on_progress(session, request, outcome)
+                except TypeError:
+                    on_progress(session)
+            task = dag.tasks.get(task_id)
+            team.publish(
+                session,
+                outcome,
+                agent_id=(task.agent_id if task is not None else task_id) or task_id,
+                role=(task.role if task is not None else "") or "",
+            )
+            if task_id:
+                if outcome.ok:
+                    dag.mark_done(task_id)
+                elif dag.can_retry(task_id, outcome.error):
+                    session.executed.discard(session.fingerprint(request))
+                    dag.reschedule(task_id)
+                else:
+                    dag.mark_failed(task_id, outcome.error)
+                session.dag = plan.to_payload()
+            ran += 1
+
+    def drain() -> None:
+        nonlocal plan
+        while True:
+            wave = plan.dag.ready_wave()
+            if halt_after is not None:
+                remaining = halt_after - ran
+                if remaining <= 0:
+                    raise CycleHalted(_cycle_snapshot(asked, session))
+                wave = wave[:remaining]
+            if not wave:
+                return
+            prepared = [_request_for(task, session, asked, team, dispatcher.budget) for task in wave]
+            workers.map(
+                list(zip(wave, prepared)),
+                lambda item: step(item[1], item[0].id),
+            )
+            plan = planner.replan(
+                plan,
+                state=session,
+                remaining_budget=max(0, dispatcher.budget - session.cost),
+                spent_cost=session.cost,
+                user_id=user_id,
+                top_k=top_k,
+                deadline=deadline,
+            )
             session.dag = plan.to_payload()
             if on_progress is not None:
                 try:
                     on_progress(session)
                 except TypeError:
-                    pass
-        outcome = _step(dispatcher, session, request, on_progress=on_progress)
-        if outcome is None:
-            if task_id:
-                dag.mark_done(task_id)
-                session.dag = plan.to_payload()
-            return
-        task = dag.tasks.get(task_id)
-        team.publish(
-            session,
-            outcome,
-            agent_id=(task.agent_id if task is not None else task_id) or task_id,
-            role=(task.role if task is not None else "") or "",
-        )
-        if task_id:
-            dag.mark_done(task_id)
-            session.dag = plan.to_payload()
-        ran += 1
-        plan = planner.replan(
-            plan,
-            state=session,
-            remaining_budget=max(0, dispatcher.budget - session.cost),
-            spent_cost=session.cost,
-            user_id=user_id,
-            top_k=top_k,
-            deadline=deadline,
-        )
-        session.dag = plan.to_payload()
-        if should_cancel is not None and should_cancel():
-            raise CycleCancelled(_cycle_snapshot(asked, session))
-        if deadline and _now() >= deadline:
-            raise CycleDeadline(_cycle_snapshot(asked, session))
-        if halt_after is not None and ran >= halt_after:
-            raise CycleHalted(_cycle_snapshot(asked, session))
+                    on_progress(session)
+            if should_cancel is not None and should_cancel():
+                raise CycleCancelled(_cycle_snapshot(asked, session))
+            if deadline and _now() >= deadline:
+                raise CycleDeadline(_cycle_snapshot(asked, session))
+            if halt_after is not None and ran >= halt_after:
+                raise CycleHalted(_cycle_snapshot(asked, session))
 
-    _drain(plan, session, asked, step, workers, team=team, budget=dispatcher.budget)
+    drain()
     if plan.dag.next_ready() is None and "synthesize" not in plan.dag.tasks:
         plan = planner.replan(
             plan,
@@ -164,36 +227,24 @@ def run_cycle(
             deadline=deadline,
         )
         session.dag = plan.to_payload()
-        _drain(plan, session, asked, step, workers, team=team, budget=dispatcher.budget)
+        drain()
     team.settle(session, asked, budget=dispatcher.budget)
     return _cycle_snapshot(asked, session)
 
 
-def _drain(
-    plan: AutonomousPlan,
-    session: ResearchState,
-    asked: str,
-    step,
-    pool: BoundedWorkerPool,
-    *,
-    team: MultiAgentCoordinator,
-    budget: int,
-) -> None:
-    while True:
-        task = plan.dag.next_ready()
-        if task is None:
-            return
-        request = task.request()
-        if task.action == SYNTHESIZE:
-            team.settle(session, asked, budget=budget)
-            if not request.query.strip():
-                request = ActionRequest(
-                    SYNTHESIZE,
-                    query=cited_answer(asked, session),
-                    user_id=task.user_id,
-                    top_k=task.top_k,
-                )
-        pool.map((task,), lambda item, req=request: step(req, item.id))
+def _request_for(task, session: ResearchState, asked: str, team: MultiAgentCoordinator, budget: int) -> ActionRequest:
+    request = task.request()
+    if task.action != SYNTHESIZE:
+        return request
+    team.settle(session, asked, budget=budget)
+    if request.query.strip():
+        return request
+    return ActionRequest(
+        SYNTHESIZE,
+        query=cited_answer(asked, session),
+        user_id=task.user_id,
+        top_k=task.top_k,
+    )
 
 
 def _cycle_snapshot(asked: str, session: ResearchState) -> CycleResult:
@@ -212,25 +263,6 @@ def _cycle_snapshot(asked: str, session: ResearchState) -> CycleResult:
         action=action,
         coordination=dict(session.coordination) if session.coordination else None,
     )
-
-
-def _step(
-    dispatcher: ActionDispatcher,
-    state: ResearchState,
-    request: ActionRequest,
-    *,
-    on_progress=None,
-) -> ActionOutcome | None:
-    if state.fingerprint(request) in state.executed:
-        return None
-    outcome = dispatcher.dispatch(request, state)
-    state.steps.append(request.action)
-    if on_progress is not None:
-        try:
-            on_progress(state, request, outcome)
-        except TypeError:
-            on_progress(state)
-    return outcome
 
 
 def _now() -> str:

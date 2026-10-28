@@ -56,12 +56,22 @@ def test_halted_session_resumes_after_application_restart(tmp_path: Path) -> Non
     restarted = create_app(settings, embedder=LocalEmbedder(dimension=128))
     with TestClient(restarted) as client:
         stored = client.get(f"/api/research/sessions/{session_id}")
+        audit = client.get(f"/api/research/sessions/{session_id}/audit")
+        trail = audit.json()
+        by_action = {item["action"]: item["status"] for item in trail["plan"]}
         resumed = client.post(f"/api/research/sessions/{session_id}/resume")
         finished = resumed.json()
         search_again = [item["runs"] for item in finished["side_effects"] if item["action"] == "search"]
 
         assert stored.json()["status"] == "halted"
         assert stored.json()["decisions"] == ["search"]
+        assert audit.status_code == 200
+        assert trail["status"] == "halted"
+        assert trail["events"][0]["action"] == "search"
+        assert trail["evidence"]
+        assert by_action["search"] == "done"
+        assert by_action["reverify"] == "pending"
+        assert by_action["synthesize"] == "pending"
         assert resumed.status_code == 200
         assert finished["status"] == "completed"
         assert finished["decisions"][0] == "search"

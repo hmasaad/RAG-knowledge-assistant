@@ -13,6 +13,7 @@ from app.research.contracts import (
     ResearchState,
 )
 from app.research.dag import DagTask, ResearchDag, build_search_dag, extend_gap_dag
+from app.research.evidence_plan import EvidenceDrivenPlanner
 from app.research.guardrails import ResearchGuardrails
 from app.research.planner import build_plan, select_tools
 from app.research.strategy import StrategyMemory, classify_situation
@@ -31,6 +32,8 @@ class AutonomousPlan:
     reason: str = "Initial plan."
     tools: tuple[str, ...] = ()
     budget: int = 16
+    signals: dict = field(default_factory=dict)
+    decision: dict = field(default_factory=dict)
 
     def actions(self) -> tuple[str, ...]:
         return tuple(self.dag.tasks[task_id].action for task_id in self.dag.order)
@@ -48,6 +51,8 @@ class AutonomousPlan:
                 "reason": self.reason,
                 "tools": list(self.tools),
                 "budget": self.budget,
+                "signals": dict(self.signals or {}),
+                "decision": dict(self.decision or {}),
             }
         )
         return payload
@@ -65,6 +70,8 @@ class AutonomousPlan:
             reason=str(data.get("reason", "")),
             tools=tuple(str(item) for item in data.get("tools", ()) or ()),
             budget=int(data.get("budget", 16) or 16),
+            signals=dict(data.get("signals", {}) or {}),
+            decision=dict(data.get("decision", {}) or {}),
         )
 
 
@@ -210,22 +217,33 @@ class AutonomousPlanner:
         top_k: int = 4,
         deadline: str = "",
     ) -> AutonomousPlan:
-        """Grow or shrink the DAG from evidence gathered so far."""
+        """Grow or shrink the DAG from evidence quality, gaps, and contradictions."""
+        pending = tuple(
+            task.action for task in plan.dag.tasks.values() if task.status == "pending"
+        )
+        decision = EvidenceDrivenPlanner().decide(
+            state,
+            pending_actions=pending,
+            strategy=self.strategy,
+        )
+        plan.signals = dict(decision.signals)
+        plan.decision = decision.to_payload()
         pruned = self._prune_stale(plan, state)
-        action = _revise_action(state, self.strategy)
+        action = decision.action
         if self.guardrails.should_stop(remaining_budget, spent_cost):
             action = "stop"
         if not pruned and not self._needs_extension(plan, action, state) and "synthesize" in plan.dag.tasks:
-            return self.optimize(
+            tightened = self.optimize(
                 plan,
                 executed=set(state.executed),
                 remaining_budget=remaining_budget,
                 spent_cost=spent_cost,
             )
-        return self.revise(
+            return self._reprioritize(tightened, decision)
+        revised = self.revise(
             plan,
             quality_action=action,
-            quality_reason=_replan_reason(action, state),
+            quality_reason=decision.reason or _replan_reason(action, state),
             gaps=tuple(gap for gap in state.gaps if not _gap_covered(gap, _covered_fills(plan))),
             conflicts=tuple(state.contradictions),
             executed=set(state.executed),
@@ -235,6 +253,9 @@ class AutonomousPlanner:
             top_k=top_k,
             deadline=deadline,
         )
+        revised.signals = dict(decision.signals)
+        revised.decision = decision.to_payload()
+        return self._reprioritize(revised, decision)
 
     def optimize(
         self,
@@ -256,6 +277,10 @@ class AutonomousPlanner:
             if task.action == SYNTHESIZE:
                 kept.append(task)
                 continue
+            fingerprint = (task.action, task.query.strip().casefold(), task.claim.strip().casefold())
+            if fingerprint in seen:
+                kept.append(replace(task, status="done"))
+                continue
             dummy = ResearchState()
             dummy.executed = set(seen)
             dummy.cost = spent_cost
@@ -265,8 +290,7 @@ class AutonomousPlanner:
                 dummy,
                 adapters=set(self.guardrails.policy.allowed_actions) - self.guardrails.policy.denied_actions,
             )
-            fingerprint = (task.action, task.query.strip().casefold(), task.claim.strip().casefold())
-            if denied or fingerprint in seen:
+            if denied:
                 continue
             if task.action in _COSTLY:
                 if costly >= max(0, remaining_budget):
@@ -275,7 +299,6 @@ class AutonomousPlanner:
             seen.add(fingerprint)
             kept.append(task)
         kept_ids = {task.id for task in kept}
-        last = ""
         rebuilt: list[DagTask] = []
         pending_synth: DagTask | None = None
         for task in kept:
@@ -285,13 +308,11 @@ class AutonomousPlanner:
             if task.status == "pending":
                 if any(parent not in kept_ids for parent in task.depends_on):
                     continue
-                last = task.id
                 rebuilt.append(task)
                 continue
-            last = task.id
             rebuilt.append(task)
         if pending_synth is not None:
-            rebuilt.append(replace(pending_synth, depends_on=(last,) if last else ()))
+            rebuilt.append(replace(pending_synth, depends_on=_frontier(rebuilt)))
         plan.dag = ResearchDag()
         for task in rebuilt:
             plan.dag.add(task)
@@ -326,9 +347,43 @@ class AutonomousPlanner:
         plan.dag.add(task)
 
     def _tail(self, dag: ResearchDag) -> tuple[str, ...]:
-        if not dag.order:
-            return ()
-        return (dag.order[-1],)
+        return dag.frontier()
+
+    def _reprioritize(self, plan: AutonomousPlan, decision) -> AutonomousPlan:
+        """Move the evidence-backed action ahead of other pending adaptive work."""
+        preferred = getattr(decision, "action", "") or ""
+        if preferred in {"", "stop"}:
+            return plan
+        sticky: list[DagTask] = []
+        movable: list[DagTask] = []
+        synth: list[DagTask] = []
+        for task_id in plan.dag.order:
+            task = plan.dag.tasks[task_id]
+            if task.action == SYNTHESIZE:
+                synth.append(task)
+            elif task.status == "pending" and not _initial_wave(task):
+                movable.append(task)
+            else:
+                sticky.append(task)
+        if not movable:
+            return plan
+        rank = {
+            RESOLVE_CONTRADICTIONS: 1,
+            FILL_GAPS: 2,
+            REVERIFY: 3,
+            SEARCH: 4,
+        }
+        movable.sort(
+            key=lambda task: (
+                0 if task.action == preferred else rank.get(task.action, 5),
+                plan.dag.order.index(task.id),
+            )
+        )
+        rebuilt = ResearchDag()
+        for task in sticky + movable + synth:
+            rebuilt.add(task)
+        plan.dag = rebuilt
+        return plan
 
     def _prune_stale(self, plan: AutonomousPlan, state: ResearchState) -> bool:
         gaps = {gap.casefold() for gap in state.gaps}
@@ -370,10 +425,19 @@ class AutonomousPlanner:
                 task.action == RESOLVE_CONTRADICTIONS for task in plan.dag.tasks.values()
             )
         if action == REVERIFY:
-            claim = (state.gaps[0] if state.gaps else plan.question).casefold()
-            return not any(
-                task.action == REVERIFY and task.claim.casefold() == claim
-                for task in plan.dag.tasks.values()
+            claims = [
+                item.claim.strip().casefold()
+                for item in state.verdicts
+                if item.verdict in {"insufficient", "unsupported", "contradicted"} and item.claim.strip()
+            ] or [plan.question.casefold()]
+            return any(
+                not any(
+                    task.action == REVERIFY
+                    and task.claim.casefold() == claim
+                    and task.status == "pending"
+                    for task in plan.dag.tasks.values()
+                )
+                for claim in claims
             )
         return False
 
@@ -421,6 +485,18 @@ def _gap_covered(gap: str, covered: set[str]) -> bool:
         return True
     alternative = reformulate(gap)
     return bool(alternative and alternative.casefold() in covered)
+
+
+def _frontier(tasks: list[DagTask]) -> tuple[str, ...]:
+    ids = {task.id for task in tasks}
+    children: set[str] = set()
+    for task in tasks:
+        if task.action == SYNTHESIZE:
+            continue
+        for parent in task.depends_on:
+            if parent in ids:
+                children.add(parent)
+    return tuple(task.id for task in tasks if task.action != SYNTHESIZE and task.id not in children)
 
 
 def _initial_wave(task: DagTask) -> bool:

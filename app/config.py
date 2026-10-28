@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     research_timeout_seconds: float = Field(default=30, gt=0, le=120)
     research_adapt_rounds: int = Field(default=2, ge=0, le=8)
     research_worker_concurrency: int = Field(default=2, ge=1, le=16)
+    research_task_concurrency: int = Field(default=2, ge=1, le=16)
     research_user_concurrency: int = Field(default=2, ge=1, le=16)
     governance_hold: bool = False
     governance_require_approval: bool = True
