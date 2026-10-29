@@ -5,7 +5,12 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.generation.agent import CLARIFICATION_TEXT, needs_clarification, reformulate
+from app.generation.agent import (
+    CLARIFICATION_TEXT,
+    is_document_overview,
+    needs_clarification,
+    reformulate,
+)
 from app.ingestion.embeddings import LocalEmbedder
 from app.wiring import build_services
 
@@ -16,6 +21,10 @@ def test_vague_questions_ask_for_a_topic() -> None:
     assert needs_clarification("help")
     assert needs_clarification("help please")
     assert not needs_clarification("which file implements the retry logic")
+    assert is_document_overview("what is this document about")
+    assert is_document_overview("summarize the file")
+    assert not is_document_overview("what is the office wifi password")
+    assert not is_document_overview("which file implements the retry logic")
     assert reformulate("Can you tell me which file implements the retry logic?") == (
         "file implements retry logic"
     )

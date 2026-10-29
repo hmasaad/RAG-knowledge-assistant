@@ -264,6 +264,7 @@ function renderAnswer(target, body) {
     <p class="meta">${escapeHtml(body.action)} · ${body.sufficient_evidence ? "enough evidence" : "not enough evidence"}${body.conflict ? " · conflict" : ""}</p>
     <p class="report">${escapeHtml(body.answer)}</p>
     ${renderCitations(body.citations)}
+    ${renderPassages(body.passages)}
   `;
 }
 
@@ -289,6 +290,20 @@ function renderEffects(effects) {
     .map((item) => `<div class="step">${escapeHtml(item.action)} ran ${item.runs} time${item.runs === 1 ? "" : "s"}</div>`)
     .join("");
   return `<h3>Adapter runs</h3>${items}`;
+}
+
+function renderPassages(passages) {
+  if (!passages || !passages.length) {
+    return `<p class="hint">No passages were retrieved. Confirm the file is indexed and the user id matches the upload.</p>`;
+  }
+  const items = passages
+    .map((item) => {
+      const name = item.source ? item.source.filename : "";
+      const cover = item.answers_question ? "covers the question" : "weak match";
+      return `<div class="citation"><strong>[${item.rank}]</strong> ${escapeHtml(name)} · ${cover}<div>${escapeHtml(item.text).slice(0, 400)}</div></div>`;
+    })
+    .join("");
+  return `<h3>Retrieved passages</h3>${items}`;
 }
 
 function renderCitations(citations) {

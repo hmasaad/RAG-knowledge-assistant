@@ -79,3 +79,13 @@ def test_answer_api(client: TestClient) -> None:
     assert refused.json()["answer"] == REFUSAL_TEXT
     assert refused.json()["sufficient_evidence"] is False
     assert refused.json()["citations"] == []
+
+    overview = client.post(
+        "/api/answer",
+        json={"question": "what is this document about", "top_k": 3},
+    )
+    assert overview.status_code == 200
+    assert overview.json()["sufficient_evidence"] is True
+    assert overview.json()["citations"]
+    assert overview.json()["citations"][0]["filename"] == "api-errors.md"
+    assert overview.json()["answer"] != REFUSAL_TEXT

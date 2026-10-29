@@ -3,10 +3,11 @@
 import re
 from typing import Protocol
 
+from app.generation.agent import is_document_overview
 from app.generation.grounding import AnswerResult, interpret_model_answer, refusal
 from app.generation.messages import build_messages
 from app.ingestion.errors import KnowledgeError
-from app.retrieval.search import RetrievalResult
+from app.retrieval.search import RankedPassage, RetrievalResult
 from app.retrieval.text import content_tokens
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
@@ -31,7 +32,7 @@ class LocalAnswerer:
                 retrieved.passages,
                 conflict=True,
             )
-        supporting = [passage for passage in retrieved.passages if passage.answers_question]
+        supporting = _supporting_passages(question, retrieved)
         if not supporting:
             return refusal(question, retrieved.passages)
         passage = supporting[0]
@@ -82,6 +83,15 @@ class OpenAIAnswerer:
             retrieved.passages,
             conflict=retrieved.conflict,
         )
+
+
+def _supporting_passages(question: str, retrieved: RetrievalResult) -> list[RankedPassage]:
+    strong = [passage for passage in retrieved.passages if passage.answers_question]
+    if strong:
+        return strong
+    if is_document_overview(question) and retrieved.passages:
+        return [retrieved.passages[0]]
+    return []
 
 
 def _conflict_answer(retrieved: RetrievalResult) -> str:
