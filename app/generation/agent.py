@@ -2,7 +2,7 @@
 
 from app.generation.grounding import AnswerResult
 from app.retrieval.queries import rewrite_query
-from app.retrieval.text import content_tokens
+from app.retrieval.text import content_tokens, focus_tokens
 
 CLARIFICATION_TEXT = "Which document or topic should I search?"
 _VAGUE = {"help", "please", "something", "anything", "this", "that", "it"}
@@ -16,6 +16,15 @@ _OVERVIEW_INTENT = {
     "overview",
     "summarize",
     "summary",
+}
+_FACT_ASK = {
+    "configured",
+    "file",
+    "implements",
+    "limit",
+    "password",
+    "which",
+    "where",
 }
 _OVERVIEW = _OVERVIEW_INTENT | {
     "all",
@@ -54,9 +63,19 @@ def wants_section_summary(question: str) -> bool:
     tokens = set(content_tokens(question))
     if tokens & _OVERVIEW_INTENT or "breakdown" in tokens:
         return True
-    folded = question.casefold()
-    return folded.startswith("what are") or (
-        "what" in tokens and "requirements" in tokens
+    folded = question.casefold().strip()
+    if folded.startswith("what are") or folded.startswith("what's") or folded.startswith("what is"):
+        topic = set(focus_tokens(question))
+        return bool(topic) and not topic & {"password", "canary", "secret", "key"}
+    if "what" in tokens and "requirements" in tokens:
+        return True
+    topic = set(focus_tokens(question))
+    if not topic or topic & {"password", "canary", "secret", "key"}:
+        return False
+    if tokens & _FACT_ASK:
+        return False
+    return bool(topic & {"admin", "portal", "mvp", "scope", "profile", "authentication"}) or (
+        "requirements" in tokens and bool(topic)
     )
 
 

@@ -14,6 +14,10 @@ from app.ingestion.similarity import cosine_similarity
 
 _HEADING = re.compile(r"^(#{1,6})[ \t]+(\S.*?)\s*$")
 _ADOC_HEADING = re.compile(r"^(=+)[ \t]+(\S.*?)\s*$")
+_NUMBERED_SECTION = re.compile(
+    r"(?:^|(?<=\n)|(?<=[.!?]\s))(\d+(?:\.\d+)*)\.\s+"
+    r"([A-Z][^.!?\n]{2,70}?)(?=\s+(?:\d+\.\s+)|$|\n)"
+)
 _SEPARATORS = ("\n\n", "\n", ". ", " ")
 STRATEGIES = ("fixed", "recursive", "semantic", "structure")
 _CODE_PATTERNS = {
@@ -44,6 +48,8 @@ class _Section:
     heading: str | None
     start: int
     end: int
+    number: str = ""
+    parent: str = ""
 
 
 @dataclass(frozen=True)
@@ -100,19 +106,42 @@ def build_chunks(
         sections = _asciidoc_sections(text)
     elif content_type in _CODE_PATTERNS:
         sections = _code_sections(text, content_type)
+    elif content_type in {"application/pdf", "text/plain"}:
+        sections = _numbered_sections(text)
     else:
         sections = [_Section(heading=None, start=0, end=len(text))]
 
     drafts: list[ChunkDraft] = []
     for section in sections:
         body = text[section.start : section.end]
+        meta = _section_meta(section)
+        if len(body) <= chunk_size:
+            drafts.append(
+                ChunkDraft(
+                    text=body,
+                    start=section.start,
+                    end=section.end,
+                    heading=meta["heading"],
+                    section_id=meta["section_id"],
+                    section_title=meta["section_title"],
+                    section_number=meta["section_number"],
+                    parent_section=meta["parent_section"],
+                    chunk_type="section",
+                )
+            )
+            continue
         for span in _chunk_text(body, chunk_size=chunk_size, overlap=overlap):
             drafts.append(
                 ChunkDraft(
                     text=span.text,
                     start=section.start + span.start,
                     end=section.start + span.end,
-                    heading=section.heading,
+                    heading=meta["heading"],
+                    section_id=meta["section_id"],
+                    section_title=meta["section_title"],
+                    section_number=meta["section_number"],
+                    parent_section=meta["parent_section"],
+                    chunk_type="section_part",
                 )
             )
     return drafts
@@ -159,6 +188,32 @@ def _asciidoc_sections(text: str) -> list[_Section]:
     return _sections_from_marks(text, headings)
 
 
+def _numbered_sections(text: str) -> list[_Section]:
+    """Keep ``11. MVP Scope`` and its bullets together in extracted PDF text."""
+    marks: list[tuple[int, str]] = []
+    for match in _NUMBERED_SECTION.finditer(text):
+        title = match.group(2).strip()
+        if not _section_title(match.group(1), title):
+            continue
+        marks.append((match.start(), title, match.group(1)))
+    if not marks:
+        return [_Section(heading=None, start=0, end=len(text))]
+    return _sections_from_marks(text, marks)
+
+
+def _section_title(number: str, title: str) -> bool:
+    words = title.split()
+    if not words or len(words) > 8:
+        return False
+    if "." in number or len(number.split(".")[0]) >= 2:
+        return True
+    return any(
+        word.casefold()
+        in {"scope", "overview", "introduction", "requirements", "admin", "portal", "profile"}
+        for word in words
+    )
+
+
 def _code_sections(text: str, content_type: str) -> list[_Section]:
     """Split source on top-level symbols. Nested definitions stay with the parent."""
     pattern = _CODE_PATTERNS[content_type]
@@ -175,16 +230,54 @@ def _code_sections(text: str, content_type: str) -> list[_Section]:
     return _sections_from_marks(text, marks)
 
 
-def _sections_from_marks(text: str, marks: list[tuple[int, str]]) -> list[_Section]:
+def _sections_from_marks(text: str, marks: list[tuple]) -> list[_Section]:
     sections: list[_Section] = []
     first = marks[0][0]
     if first > 0 and text[:first].strip():
         sections.append(_Section(heading=None, start=0, end=first))
-    for index, (start, heading) in enumerate(marks):
+    for index, mark in enumerate(marks):
+        start = mark[0]
+        heading = mark[1]
+        number = mark[2] if len(mark) > 2 else ""
+        if not number:
+            number, stripped = _split_numbered_title(heading)
+            if number:
+                heading = stripped
         end = marks[index + 1][0] if index + 1 < len(marks) else len(text)
         if text[start:end].strip():
-            sections.append(_Section(heading=heading, start=start, end=end))
+            sections.append(_Section(heading=heading, start=start, end=end, number=number))
     return sections
+
+
+def _split_numbered_title(heading: str) -> tuple[str, str]:
+    match = re.match(r"^(\d+(?:\.\d+)*)\.\s+(.*)$", (heading or "").strip())
+    if match:
+        return match.group(1), match.group(2).strip()
+    return "", (heading or "").strip()
+
+
+def _section_meta(section: _Section) -> dict[str, str]:
+    title = (section.heading or "").strip()
+    number = section.number or _split_numbered_title(title)[0]
+    if number and title and title.startswith(f"{number}."):
+        title = title[len(number) + 1 :].strip()
+    if number:
+        section_id = "section_" + number.replace(".", "_")
+        heading = f"{number}. {title}" if title else number
+    elif title:
+        slug = re.sub(r"[^a-z0-9]+", "_", title.casefold()).strip("_")
+        section_id = f"section_{slug}" if slug else ""
+        heading = title
+    else:
+        section_id = ""
+        heading = ""
+    return {
+        "heading": heading or None,
+        "section_id": section_id,
+        "section_title": title,
+        "section_number": number,
+        "parent_section": section.parent,
+    }
 
 
 def _line_content(line: str) -> str:

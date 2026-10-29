@@ -7,6 +7,8 @@ from app.retrieval.text import content_tokens, focus_tokens
 _TOPIC_ALIASES = (
     (("admin", "portal"), ("admin portal", "web admin", "platform admin", "management portal")),
     (("management", "portal"), ("management portal", "salon management portal")),
+    (("mvp",), ("acceptance criteria", "acceptance criteria for mvp")),
+    (("authentication",), ("authentication & profile", "sign up", "sign in")),
 )
 
 _PREFIXES = (

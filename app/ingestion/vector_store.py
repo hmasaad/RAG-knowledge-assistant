@@ -274,6 +274,12 @@ def _metadata(chunk: Chunk) -> dict[str, Any]:
         "page": chunk.page if chunk.page is not None else _PAGE_MISSING,
         "heading": chunk.heading or "",
         "version": chunk.version,
+        "section_id": chunk.section_id,
+        "section_title": chunk.section_title,
+        "section_number": chunk.section_number,
+        "parent_section": chunk.parent_section,
+        "chunk_type": chunk.chunk_type,
+        "bullet_index": chunk.bullet_index,
     }
     if chunk.parent_id:
         payload["parent_id"] = chunk.parent_id

@@ -162,6 +162,92 @@ def test_research_cycle_answers_a_section_question(client: TestClient) -> None:
     assert not any("Authentication" in gap for gap in body["gaps"])
 
 
+def test_research_cycle_answers_authentication_flow(client: TestClient) -> None:
+    payload = (
+        b"## 4.1 Authentication & Profile\n\n"
+        b"Sign up and sign in using email/phone and password or OTP. "
+        b"Optional social login. Password reset and account recovery.\n\n"
+        b"## Non-Functional Requirements\n\n"
+        b"Observability. Scalability Backend should support growth in salons.\n\n"
+        b"## Key User Flow\n\n"
+        b"Customer: Open App then Search then Select Salon.\n"
+    )
+    uploaded = client.post(
+        "/api/documents",
+        files={"file": ("auth.md", payload, "text/markdown")},
+    )
+    response = client.post(
+        "/api/research/cycle",
+        json={"question": "authentication flow", "top_k": 4},
+    )
+    body = response.json()
+
+    assert uploaded.status_code == 201
+    assert body["action"] == "research"
+    assert "Sign up" in body["report"] or "sign in" in body["report"].lower()
+    assert body["report"] != "I don't have enough evidence to answer."
+    assert not any("authentication" in gap.casefold() for gap in body["gaps"])
+
+
+def test_research_cycle_answers_mvp_scope(client: TestClient) -> None:
+    payload = (
+        b"10. Notifications Push booking notifications. Payment details and invoices.\n"
+        b"11. MVP Scope\n"
+        b"1. Customer registration/login and profile.\n"
+        b"2. Salon discovery and search.\n"
+        b"3. Salon details and service catalog.\n"
+        b"4. Stylist selection.\n"
+        b"5. Availability and appointment booking.\n"
+        b"6. Booking history and cancellation/rescheduling.\n"
+        b"7. Push booking notifications.\n"
+        b"8. Basic salon dashboard and calendar.\n"
+        b"9. Service and staff management.\n"
+        b"10. Basic admin management.\n"
+    )
+    uploaded = client.post(
+        "/api/documents",
+        files={"file": ("mvp.txt", payload, "text/plain")},
+    )
+    response = client.post(
+        "/api/research/cycle",
+        json={"question": "what is MVP scope?", "top_k": 4},
+    )
+    body = response.json()
+
+    assert uploaded.status_code == 201
+    assert body["action"] == "research"
+    report = body["report"]
+    assert "registration" in report
+    assert "Stylist selection" in report
+    assert "Basic admin management" in report
+    assert report.count("\n") >= 9
+    assert report != "I don't have enough evidence to answer."
+    assert not any("MVP" in gap for gap in body["gaps"])
+
+
+def test_research_cycle_answers_admin_portal_requirements(client: TestClient) -> None:
+    payload = (
+        b"5. Admin Portal\n"
+        b"1. Platform Admin Manage salons, users, moderation, payments, and analytics.\n"
+        b"2. Web Admin Configure salon listings and support tools.\n"
+        b"3. Salon owners can view bookings from the admin dashboard.\n"
+    )
+    uploaded = client.post(
+        "/api/documents",
+        files={"file": ("admin-portal.txt", payload, "text/plain")},
+    )
+    response = client.post(
+        "/api/research/cycle",
+        json={"question": "admin portal requirements", "top_k": 4},
+    )
+    body = response.json()
+
+    assert uploaded.status_code == 201
+    assert body["action"] == "research"
+    assert "Admin" in body["report"] or "admin" in body["report"].lower()
+    assert body["report"] != "I don't have enough evidence to answer."
+
+
 def test_cited_answer_keeps_a_compact_on_topic_report() -> None:
     state = ResearchState(
         evidence=[

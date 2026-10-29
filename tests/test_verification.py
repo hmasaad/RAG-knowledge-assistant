@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.research.verification import assess_claim, find_contradictions
+from app.research.verification import assess_claim, find_contradictions, should_accept_evidence
 from app.retrieval.search import RankedPassage, SourceMetadata
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +38,24 @@ def test_claim_verification_scores_support() -> None:
         ),
     )
     assert section.verdict == "supported"
+    mvp = assess_claim(
+        "what is MVP scope?",
+        _passage(
+            "14. Acceptance Criteria for MVP 1. Customers can successfully create an account and log in.",
+            filename="salon.pdf",
+        ),
+    )
+    assert mvp.verdict == "supported"
+    bullet = _passage(
+        "Salon discovery and search.",
+        filename="salon.pdf",
+        section_title="MVP Scope",
+        heading="11. MVP Scope",
+    )
+    assert assess_claim("what is MVP scope?", bullet).verdict == "supported"
+    assert should_accept_evidence("what is MVP scope?", bullet)
+    assert not should_accept_evidence("what is the office wifi password", bullet)
+    assert not should_accept_evidence("The retry limit is three attempts.", bullet)
 
 
 def test_contradictions_require_different_files_and_numbers() -> None:
@@ -86,7 +104,13 @@ def test_research_reports_verified_claims_and_the_conflict(client: TestClient) -
     assert "retry-limit-five.md" in conflict["summary"]
 
 
-def _passage(text: str, *, filename: str) -> RankedPassage:
+def _passage(
+    text: str,
+    *,
+    filename: str,
+    heading: str = "Retry policy",
+    section_title: str = "",
+) -> RankedPassage:
     return RankedPassage(
         rank=1,
         text=text,
@@ -104,6 +128,7 @@ def _passage(text: str, *, filename: str) -> RankedPassage:
             start_char=0,
             end_char=len(text),
             page=None,
-            heading="Retry policy",
+            heading=heading,
+            section_title=section_title,
         ),
     )

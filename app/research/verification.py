@@ -4,7 +4,23 @@ import re
 from dataclasses import dataclass
 from itertools import combinations
 
-from app.generation.grounding import SUPPORT_THRESHOLD, AnswerResult, claim_support
+from app.generation.grounding import SUPPORT_THRESHOLD, AnswerResult
+from app.research.context_evidence import (
+    section_matches_question,
+    should_accept_evidence,
+    support_with_context,
+)
+
+__all__ = (
+    "ClaimAssessment",
+    "Contradiction",
+    "assess_claim",
+    "section_matches_question",
+    "should_accept_evidence",
+    "verify_answer",
+    "find_contradictions",
+    "passage_contradiction",
+)
 from app.retrieval.conflicts import numeric_facts
 from app.retrieval.search import RankedPassage
 
@@ -39,7 +55,7 @@ def assess_claim(claim: str, passage: RankedPassage) -> ClaimAssessment:
     ``supported`` clears the citation bar. ``unsupported`` does not.
     ``unverifiable`` has no content words left after the short-word filter.
     """
-    ratio = claim_support(claim, passage.model_text())
+    ratio = support_with_context(claim, passage)
     if ratio is None:
         verdict = "unverifiable"
     elif ratio >= SUPPORT_THRESHOLD:

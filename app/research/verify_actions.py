@@ -1,5 +1,8 @@
 """Verification adapters. They score state evidence; they do not search."""
 
+from app.observability.logging import log_event
+from app.research.claim_verifier import verify_resolved
+from app.research.context_resolver import resolve_context
 from app.research.contracts import (
     REVERIFY,
     RESOLVE_CONTRADICTIONS,
@@ -9,22 +12,37 @@ from app.research.contracts import (
     EvidenceRef,
     ResearchState,
 )
-from app.research.verification import assess_claim, passage_contradiction
+from app.research.ledger import EvidenceLedger
+from app.research.verification import passage_contradiction
 from app.retrieval.search import RankedPassage, SourceMetadata
 
 
 class VerifyAction:
-    """Judge a claim against evidence already on the research session."""
+    """Resolve section context, score the claim, and write the evidence ledger."""
 
     action = REVERIFY
 
     def run(self, request: ActionRequest, state: ResearchState | None = None) -> ActionOutcome:
         pool = list(state.evidence) if state is not None else []
+        ledger = EvidenceLedger.from_payload(list(state.ledger) if state is not None else [])
         supporting: list[str] = []
+        decisions: list[dict] = []
         for item in pool:
-            assessment = assess_claim(request.claim, as_passage(item))
-            if assessment.verdict == "supported":
+            resolved = resolve_context(item, pool)
+            entry = verify_resolved(request.claim, resolved, pool)
+            ledger.record(entry)
+            decisions.append(entry.to_payload())
+            if entry.verdict == "supported":
                 supporting.append(item.evidence_id)
+        rows = tuple(ledger.to_payload())
+        log_event(
+            "rag.research.stages",
+            "reverify",
+            claim=request.claim,
+            supporting=list(supporting),
+            rejected=[row["evidence_id"] for row in decisions if row["evidence_id"] not in supporting],
+            decisions=decisions,
+        )
         verdict = "supported" if supporting else "insufficient"
         return ActionOutcome(
             action=self.action,
@@ -39,6 +57,7 @@ class VerifyAction:
             gaps=() if supporting else (request.claim,),
             provenance=tuple(supporting),
             cost=0,
+            ledger=rows,
         )
 
 
@@ -77,10 +96,13 @@ def as_passage(item: EvidenceRef) -> RankedPassage:
             document_id=item.document_id,
             filename=item.source,
             content_type="text/markdown",
-            chunk_index=0,
-            start_char=0,
-            end_char=len(item.text),
-            page=None,
-            heading=None,
+            chunk_index=item.chunk_index,
+            start_char=item.start_char,
+            end_char=item.end_char or len(item.text),
+            page=item.page,
+            heading=item.heading or None,
+            section_id=item.section_id,
+            section_title=item.section_title,
+            section_number=item.section_number,
         ),
     )

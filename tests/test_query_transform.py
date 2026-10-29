@@ -16,6 +16,8 @@ def test_admin_portal_adds_section_aliases() -> None:
     assert "web admin" in extras
     assert "platform admin" in extras
     assert extra_topic_queries("which file implements the retry logic") == ()
+    assert "acceptance criteria" in extra_topic_queries("what is MVP scope?")
+    assert "authentication & profile" in extra_topic_queries("authentication flow")
 
 
 def test_rewrite_drops_politeness() -> None:

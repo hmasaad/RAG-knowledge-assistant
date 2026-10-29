@@ -46,6 +46,9 @@ class SourceLocation:
     end_char: int
     page: int | None
     heading: str | None
+    section_id: str = ""
+    section_title: str = ""
+    section_number: str = ""
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,9 @@ def _from_ranked(passage: RankedPassage) -> RagPassage:
             end_char=source.end_char,
             page=source.page,
             heading=source.heading,
+            section_id=source.section_id,
+            section_title=source.section_title,
+            section_number=source.section_number,
         ),
         answers_question=passage.answers_question,
         matched_terms=passage.matched_terms,
@@ -198,6 +204,9 @@ def _to_ranked(passage: RagPassage) -> RankedPassage:
             end_char=source.end_char,
             page=source.page,
             heading=source.heading,
+            section_id=source.section_id,
+            section_title=source.section_title,
+            section_number=source.section_number,
         ),
         safe_text=passage.safe_text,
         instruction_detected=passage.instruction_detected,

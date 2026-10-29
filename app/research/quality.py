@@ -176,7 +176,7 @@ def is_confident(score: ResearchQualityScore, report) -> bool:
         if UNSUPPORTED_CLAIM in item.failures or MISSING_EVIDENCE in item.failures
     ]
     if weak:
-        return False
+        return bool(supported) and len(supported) >= len(weak)
     if not score.claims and not getattr(report, "sufficient_evidence", False):
         return False
     if not supported and score.claims:

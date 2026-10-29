@@ -53,6 +53,13 @@ def split_children(
                     parent_index=parent.index,
                     parent_start=parent.start_char,
                     parent_end=parent.end_char,
+                    context=parent.context,
+                    section_id=parent.section_id,
+                    section_title=parent.section_title,
+                    section_number=parent.section_number,
+                    parent_section=parent.parent_section,
+                    chunk_type=parent.chunk_type or "requirement_bullet",
+                    bullet_index=offset,
                 )
             )
     return produced

@@ -120,13 +120,13 @@ def claim_support(claim: str, passage: str) -> float | None:
     tokens = [
         token
         for token in focus_tokens(claim)
-        if len(token) >= 4 and token not in _BOILERPLATE
+        if len(token) >= 3 and token not in _BOILERPLATE
     ]
     if not tokens:
         tokens = [
             token
             for token in content_tokens(claim)
-            if len(token) >= 4 and token not in _BOILERPLATE
+            if len(token) >= 3 and token not in _BOILERPLATE
         ]
     if not tokens:
         return None

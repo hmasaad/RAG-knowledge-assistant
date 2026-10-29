@@ -40,7 +40,7 @@ _GENERIC_TOPIC = frozenset(
 _SPEC_HEADER = re.compile(
     r"(?i)(?:^|\s)(?:[^\n.]{0,80}requirements specification\s+)?page\s+\d+\s*"
 )
-_BULLET = re.compile(r"(?:^|[•●]|\n\s*[-*]\s+|\n\s*\d+\.\s+)")
+_BULLET = re.compile(r"(?:^|[•●]|(?:\n\s*)?[-*]\s+|(?:^|\n|\s)\d+\.\s+)")
 
 
 class Answerer(Protocol):
@@ -150,30 +150,55 @@ def section_summary(
     for passage in passages:
         require_topic = bool(terms) and not is_document_overview(question)
         number = retrieved.passages.index(passage) + 1
-        for point in _section_points(passage.model_text(), terms, require_topic=require_topic):
+        inherited = " ".join(
+            part
+            for part in (passage.source.heading, passage.source.section_title)
+            if part
+        )
+        for point in _section_points(
+            passage.model_text(),
+            terms,
+            require_topic=require_topic,
+            inherited=inherited,
+        ):
             key = point.casefold()
             if key in seen:
                 continue
             seen.add(key)
             items.append((point, number))
-            if len(items) >= 8:
+            if len(items) >= 16:
                 break
-        if len(items) >= 8:
+        if len(items) >= 16:
             break
     return numbered_list(items)
 
 
-def _section_points(text: str, terms: tuple[str, ...], *, require_topic: bool = True) -> list[str]:
+def _section_points(
+    text: str,
+    terms: tuple[str, ...],
+    *,
+    require_topic: bool = True,
+    inherited: str = "",
+) -> list[str]:
     compact = _SPEC_HEADER.sub(" ", _clean_excerpt(text, limit=4000)).strip()
+    scoped = f"{inherited} {compact}".strip()
     if require_topic and terms and not (
-        set(terms) & set(content_tokens(compact))
-        or any(term in compact.casefold() for term in terms)
+        set(terms) & set(content_tokens(scoped))
+        or any(term in scoped.casefold() for term in terms)
     ):
         return []
     raw = [piece.strip(" -•\t") for piece in _BULLET.split(compact) if piece.strip(" -•\t")]
     pieces: list[str] = []
     for part in raw or [compact]:
         pieces.extend(_split_sentences(part) or [part])
+    if terms:
+        start = 0
+        for index, piece in enumerate(pieces):
+            folded = piece.casefold()
+            if set(terms) & set(content_tokens(piece)) or any(term in folded for term in terms):
+                start = index
+                break
+        pieces = pieces[start:]
     points: list[str] = []
     for piece in pieces:
         cleaned = _clean_excerpt(piece, limit=280)
@@ -186,7 +211,7 @@ def _section_points(text: str, terms: tuple[str, ...], *, require_topic: bool = 
         if len(cleaned) < 12:
             continue
         points.append(cleaned)
-    return points[:8]
+    return points[:16]
 
 
 def numbered_list(items: list[tuple[str, int]]) -> str:

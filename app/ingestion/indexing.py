@@ -1,6 +1,7 @@
 """Index one stored document version."""
 
 import time
+from dataclasses import replace
 
 from app.ingestion.chunking import build_chunks
 from app.ingestion.cleaning import clean_text
@@ -189,35 +190,38 @@ def _chunks_for_pages(
                     page=page.number,
                     heading=draft.heading,
                     version=version,
+                    section_id=draft.section_id,
+                    section_title=draft.section_title,
+                    section_number=draft.section_number,
+                    parent_section=draft.parent_section,
+                    chunk_type=draft.chunk_type,
+                    bullet_index=draft.bullet_index,
+                    context=situate(
+                        filename,
+                        draft.heading,
+                        section_title=draft.section_title,
+                    ),
                 )
             )
     if parent_retrieval:
         chunks = split_children(chunks, child_chunk_size=child_chunk_size, overlap=chunk_overlap)
+        chunks = [
+            replace(
+                chunk,
+                context=chunk.context
+                or situate(chunk.filename, chunk.heading, section_title=chunk.section_title),
+            )
+            for chunk in chunks
+        ]
     if contextual_retrieval:
-        chunks = [_with_context(chunk) for chunk in chunks]
+        chunks = [
+            replace(
+                chunk,
+                context=situate(chunk.filename, chunk.heading, section_title=chunk.section_title),
+            )
+            for chunk in chunks
+        ]
     return chunks
-
-
-def _with_context(chunk: Chunk) -> Chunk:
-    return Chunk(
-        id=chunk.id,
-        document_id=chunk.document_id,
-        filename=chunk.filename,
-        content_type=chunk.content_type,
-        text=chunk.text,
-        index=chunk.index,
-        start_char=chunk.start_char,
-        end_char=chunk.end_char,
-        page=chunk.page,
-        heading=chunk.heading,
-        version=chunk.version,
-        parent_id=chunk.parent_id,
-        parent_text=chunk.parent_text,
-        parent_index=chunk.parent_index,
-        parent_start=chunk.parent_start,
-        parent_end=chunk.parent_end,
-        context=situate(chunk.filename, chunk.heading),
-    )
 
 
 def _graph_edges(chunks: list[Chunk]) -> list[GraphEdge]:

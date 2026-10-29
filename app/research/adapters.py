@@ -1,6 +1,7 @@
 """Compose worker adapters. RAG, verification, and the graph are optional."""
 
 from app.ingestion.metadata_store import MetadataStore
+from app.observability.logging import log_event
 from app.research.contracts import (
     FILL_GAPS,
     SEARCH,
@@ -45,8 +46,19 @@ class SynthesizeAction:
 
     def run(self, request: ActionRequest, state: ResearchState | None = None) -> ActionOutcome:
         report = request.query.strip()
-        if not report and state is not None:
-            report = cited_answer(request.claim or request.query, state)
+        context = "\n\n".join(item.text for item in state.evidence) if state is not None else ""
+        looks_like_answer = "[" in report
+        if state is not None and (not report or not looks_like_answer):
+            report = cited_answer(request.claim or request.query or report, state)
+        log_event(
+            "rag.research.stages",
+            "synthesize",
+            claim=request.claim or request.query,
+            input_context=context,
+            prompt=request.query,
+            raw_response=report,
+            evidence_ids=[item.evidence_id for item in (state.evidence if state else ())],
+        )
         return ActionOutcome(action=self.action, ok=True, report=report, cost=0)
 
 
@@ -90,7 +102,15 @@ def cited_answer(question: str, state: ResearchState) -> str:
     """Build a short cited report from the passages that best match the question."""
     from app.generation.agent import wants_section_summary
     from app.generation.answerers import _section_points, numbered_list
+    from app.research.context_evidence import section_matches_question
+    from app.research.synthesis_guard import preserve_supported
     from app.retrieval.text import content_tokens, focus_tokens
+    from app.security.prompts import REFUSAL_TEXT
+
+    if state.ledger:
+        guarded = preserve_supported(question, state)
+        if guarded != REFUSAL_TEXT:
+            return guarded
 
     supported = [item for item in state.verdicts if item.verdict == "supported"]
     by_id = {item.evidence_id: item for item in state.evidence}
@@ -113,7 +133,7 @@ def cited_answer(question: str, state: ResearchState) -> str:
     scored.sort(key=lambda item: (-item[0], len(item[1])))
     lines = []
     used: set[str] = set()
-    limit = 8 if wants_section_summary(question) else 2
+    limit = 16 if wants_section_summary(question) else 2
     ordered: list[tuple[str, int]] = []
     if wants_section_summary(question):
         marker = 0
@@ -123,7 +143,18 @@ def cited_answer(question: str, state: ResearchState) -> str:
                 if passage is None:
                     continue
                 marker += 1
-                for point in _section_points(passage.text, focus):
+                inherited = " ".join(
+                    part
+                    for part in (passage.heading, passage.section_title)
+                    if part
+                )
+                member = section_matches_question(passage.section_title or passage.heading, question)
+                for point in _section_points(
+                    passage.text,
+                    focus,
+                    require_topic=not member,
+                    inherited=inherited,
+                ):
                     key = point.casefold()
                     if key in used:
                         continue
@@ -145,8 +176,34 @@ def cited_answer(question: str, state: ResearchState) -> str:
             if len(ordered) >= limit:
                 break
     if not ordered:
-        from app.security.prompts import REFUSAL_TEXT
-
+        marker = 0
+        for verdict in supported:
+            for evidence_id in verdict.evidence_ids:
+                passage = by_id.get(evidence_id)
+                if passage is None:
+                    continue
+                marker += 1
+                inherited = " ".join(
+                    part for part in (passage.heading, passage.section_title) if part
+                )
+                for point in _section_points(
+                    passage.text,
+                    focus,
+                    require_topic=False,
+                    inherited=inherited,
+                ):
+                    key = point.casefold()
+                    if key in used:
+                        continue
+                    used.add(key)
+                    ordered.append((point, marker))
+                    if len(ordered) >= limit:
+                        break
+                if len(ordered) >= limit:
+                    break
+            if len(ordered) >= limit:
+                break
+    if not ordered:
         return REFUSAL_TEXT
     text = numbered_list(ordered)
     if state.contradictions:
@@ -172,8 +229,26 @@ def from_search(registry: ToolRegistry, action: str, request: ActionRequest) -> 
                     document_id=passage.document_id,
                     source=passage.source.filename,
                     text=passage.text,
+                    heading=passage.source.heading or "",
+                    section_title=passage.source.section_title or passage.source.heading or "",
+                    section_id=passage.source.section_id,
+                    section_number=passage.source.section_number,
+                    start_char=passage.source.start_char,
+                    end_char=passage.source.end_char,
+                    page=passage.source.page,
+                    chunk_index=passage.source.chunk_index,
                 )
             )
+    passages = [] if result.search is None else list(result.search.passages)
+    log_event(
+        "rag.research.stages",
+        "search",
+        query=query,
+        chunk_ids=[item.evidence_id for item in evidence],
+        scores=[passage.score for passage in passages],
+        token_counts=[len(item.text.split()) for item in evidence],
+        texts=[item.text for item in evidence],
+    )
     return ActionOutcome(
         action=action,
         ok=True,

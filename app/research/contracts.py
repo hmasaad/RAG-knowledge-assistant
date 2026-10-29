@@ -41,6 +41,14 @@ class EvidenceRef:
     document_id: str
     source: str
     text: str = ""
+    heading: str = ""
+    section_title: str = ""
+    section_id: str = ""
+    section_number: str = ""
+    start_char: int = 0
+    end_char: int = 0
+    page: int | None = None
+    chunk_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -62,6 +70,7 @@ class ActionOutcome:
     provenance: tuple[str, ...] = ()
     report: str = ""
     cost: int = 1
+    ledger: tuple[dict, ...] = ()
 
 
 class ActionAdapter(Protocol):
@@ -91,6 +100,7 @@ class ResearchState:
     findings: list[dict] = field(default_factory=list)
     coordination: dict = field(default_factory=dict)
     voi_log: list[dict] = field(default_factory=list)
+    ledger: list[dict] = field(default_factory=list)
 
     def to_payload(self) -> dict:
         return {
@@ -100,6 +110,14 @@ class ResearchState:
                     "document_id": item.document_id,
                     "source": item.source,
                     "text": item.text,
+                    "heading": item.heading,
+                    "section_title": item.section_title,
+                    "section_id": item.section_id,
+                    "section_number": item.section_number,
+                    "start_char": item.start_char,
+                    "end_char": item.end_char,
+                    "page": item.page,
+                    "chunk_index": item.chunk_index,
                 }
                 for item in self.evidence
             ],
@@ -124,6 +142,7 @@ class ResearchState:
             "findings": [dict(item) for item in self.findings],
             "coordination": dict(self.coordination or {}),
             "voi_log": [dict(item) for item in self.voi_log],
+            "ledger": [dict(item) for item in self.ledger],
         }
 
     @classmethod
@@ -141,6 +160,14 @@ class ResearchState:
                     document_id=str(item.get("document_id", "")),
                     source=str(item.get("source", "")),
                     text=str(item.get("text", "")),
+                    heading=str(item.get("heading", "")),
+                    section_title=str(item.get("section_title", "")),
+                    section_id=str(item.get("section_id", "")),
+                    section_number=str(item.get("section_number", "")),
+                    start_char=int(item.get("start_char", 0) or 0),
+                    end_char=int(item.get("end_char", 0) or 0),
+                    page=item.get("page"),
+                    chunk_index=int(item.get("chunk_index", 0) or 0),
                 )
                 for item in data.get("evidence", [])
             ],
@@ -165,6 +192,7 @@ class ResearchState:
             findings=[dict(item) for item in data.get("findings", []) or [] if isinstance(item, dict)],
             coordination=dict(data.get("coordination", {}) or {}),
             voi_log=[dict(item) for item in data.get("voi_log", []) or [] if isinstance(item, dict)],
+            ledger=[dict(item) for item in data.get("ledger", []) or [] if isinstance(item, dict)],
         )
 
     def fingerprint(self, request: ActionRequest) -> tuple[str, str, str]:
@@ -181,6 +209,10 @@ class ResearchState:
         self.evidence.extend(outcome.evidence)
         self.verdicts.extend(outcome.verdicts)
         self.provenance.extend(outcome.provenance)
+        extra = getattr(outcome, "ledger", ()) or ()
+        for row in extra:
+            if isinstance(row, dict):
+                self.ledger.append(row)
         if outcome.report:
             self.report = outcome.report
         if outcome.ok:

@@ -676,6 +676,9 @@ def _outcome_payload(outcome: ActionOutcome) -> dict:
                 "document_id": item.document_id,
                 "source": item.source,
                 "text": item.text,
+                "heading": item.heading,
+                "section_title": item.section_title,
+                "section_id": item.section_id,
             }
             for item in outcome.evidence
         ],

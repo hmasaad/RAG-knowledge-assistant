@@ -53,6 +53,25 @@ def test_markdown_sections_keep_headings_and_ignore_fences() -> None:
     assert text[retry.start : retry.end] == retry.text
 
 
+def test_pdf_keeps_mvp_scope_with_its_bullets() -> None:
+    text = (
+        "10. Notifications Push booking notifications. Payment details and invoices.\n"
+        "11. MVP Scope\n"
+        "1. Customer registration/login and profile.\n"
+        "2. Salon discovery and search.\n"
+        "10. Basic admin management.\n"
+    )
+    drafts = build_chunks(text, content_type="application/pdf", chunk_size=80, overlap=10)
+
+    mvp = [draft for draft in drafts if draft.section_title == "MVP Scope"]
+    assert mvp
+    assert all(draft.section_id == "section_11" for draft in mvp)
+    assert all(draft.heading == "11. MVP Scope" for draft in mvp)
+    assert all("Payment details" not in draft.text for draft in mvp)
+    assert any("Customer registration" in draft.text for draft in mvp)
+    assert len({draft.section_id for draft in mvp}) == 1
+
+
 def test_empty_text_yields_no_chunks() -> None:
     assert build_chunks("  \n\n  ", content_type="text/plain", chunk_size=100, overlap=10) == []
 

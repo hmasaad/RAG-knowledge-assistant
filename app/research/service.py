@@ -1360,10 +1360,11 @@ def _result_payload(result: CycleResult) -> dict:
                 "evidence_id": item.evidence_id,
                 "document_id": item.document_id,
                 "source": item.source,
-                "text": item.text,
+                    "text": item.text,
             }
             for item in result.evidence
         ],
+        "ledger": [dict(item) for item in result.ledger],
     }
 
 
@@ -1384,6 +1385,9 @@ def _cycle_result(session: ResearchSession) -> CycleResult:
             document_id=str(item.get("document_id", "")),
             source=str(item.get("source", "")),
             text=str(item.get("text", "")),
+            heading=str(item.get("heading", "")),
+            section_title=str(item.get("section_title", "")),
+            section_id=str(item.get("section_id", "")),
         )
         for item in payload.get("evidence", [])
     ) or tuple(state.evidence)
@@ -1398,6 +1402,7 @@ def _cycle_result(session: ResearchSession) -> CycleResult:
         contradictions=_union(payload.get("contradictions"), state.contradictions, session.contradictions),
         cost=int(payload.get("cost", session.cost) or 0),
         action=str(payload.get("action", session.action)),
+        ledger=tuple(dict(item) for item in payload.get("ledger", getattr(state, "ledger", ())) or ()),
     )
 
 
@@ -1408,31 +1413,42 @@ def _cycle_report(
     trace_id: str,
     budget: int,
 ) -> ResearchReport:
-    citations: list[Citation] = []
-    seen: set[str] = set()
+    from app.research.ledger import EvidenceLedger
+    from app.research.synthesis_guard import _supported_ids
+    from app.research.verify_actions import as_passage
+
     by_id = {item.evidence_id: item for item in result.evidence}
-    for verdict in result.verdicts:
-        if verdict.verdict != "supported":
+    fake_state = ResearchState(
+        evidence=list(result.evidence),
+        verdicts=list(result.verdicts),
+        ledger=list(result.ledger),
+    )
+    ordered_ids = _supported_ids(
+        fake_state,
+        EvidenceLedger.from_payload(list(result.ledger)),
+        question,
+        by_id,
+    )
+    passages: list[RankedPassage] = []
+    citations: list[Citation] = []
+    for evidence_id in ordered_ids:
+        item = by_id.get(evidence_id)
+        if item is None:
             continue
-        for evidence_id in verdict.evidence_ids:
-            if evidence_id in seen:
-                continue
-            passage = by_id.get(evidence_id)
-            if passage is None:
-                continue
-            seen.add(evidence_id)
-            citations.append(
-                Citation(
-                    marker=f"[{len(citations) + 1}]",
-                    chunk_id=passage.evidence_id,
-                    document_id=passage.document_id,
-                    filename=passage.source,
-                    content_type="text/markdown",
-                    heading=None,
-                    page=None,
-                    quote=_quote(passage.text),
-                )
+        ranked = as_passage(item)
+        passages.append(ranked)
+        citations.append(
+            Citation(
+                marker=f"[{len(citations) + 1}]",
+                chunk_id=item.evidence_id,
+                document_id=item.document_id,
+                filename=item.source,
+                content_type="text/markdown",
+                heading=item.heading or None,
+                page=item.page,
+                quote=item.text.strip(),
             )
+        )
     steps = tuple(
         ResearchStep(question=question, tool=name, status="ok", evidence="", complete=True)
         for name in result.steps
@@ -1448,7 +1464,7 @@ def _cycle_report(
         gaps=result.gaps,
         catalog=(),
         citations=citations,
-        passages=[],
+        passages=passages,
         action=result.action,
         trace_id=trace_id,
         decision="report" if result.sufficient_evidence else "stop",

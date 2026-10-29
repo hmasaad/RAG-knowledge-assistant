@@ -33,6 +33,11 @@ class SourceMetadata:
     end_char: int
     page: int | None
     heading: str | None
+    section_id: str = ""
+    section_title: str = ""
+    section_number: str = ""
+    chunk_type: str = ""
+    bullet_index: int = -1
 
 
 @dataclass(frozen=True)
@@ -363,6 +368,11 @@ def _source(chunk_id: str, metadata: dict[str, object]) -> SourceMetadata:
         end_char=int(metadata.get("end_char", 0)),
         page=None if int(page) < 0 else int(page),
         heading=str(heading) or None,
+        section_id=str(metadata.get("section_id") or ""),
+        section_title=str(metadata.get("section_title") or ""),
+        section_number=str(metadata.get("section_number") or ""),
+        chunk_type=str(metadata.get("chunk_type") or ""),
+        bullet_index=int(metadata.get("bullet_index", -1) or -1),
     )
 
 

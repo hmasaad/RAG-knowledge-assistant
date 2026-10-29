@@ -28,6 +28,12 @@ class ChunkDraft:
     start: int
     end: int
     heading: str | None
+    section_id: str = ""
+    section_title: str = ""
+    section_number: str = ""
+    parent_section: str = ""
+    chunk_type: str = "section"
+    bullet_index: int = -1
 
 
 @dataclass(frozen=True)
@@ -49,6 +55,12 @@ class Chunk:
     parent_start: int = -1
     parent_end: int = -1
     context: str = ""
+    section_id: str = ""
+    section_title: str = ""
+    section_number: str = ""
+    parent_section: str = ""
+    chunk_type: str = ""
+    bullet_index: int = -1
 
 
 @dataclass(frozen=True)

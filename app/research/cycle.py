@@ -4,6 +4,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from app.observability.logging import log_event
 from app.research.adapters import cited_answer
 from app.research.contracts import (
     FILL_GAPS,
@@ -61,6 +62,7 @@ class CycleResult:
     action: str
     graph: object | None = None
     coordination: dict | None = None
+    ledger: tuple[dict, ...] = ()
 
 
 def run_cycle(
@@ -253,9 +255,19 @@ def _request_for(task, session: ResearchState, asked: str, team: MultiAgentCoord
 def _cycle_snapshot(asked: str, session: ResearchState) -> CycleResult:
     supported = any(item.verdict == "supported" for item in session.verdicts)
     action = "research" if supported or session.report else "refuse"
+    report = session.report or cited_answer(asked, session)
+    log_event(
+        "rag.research.stages",
+        "final_answer",
+        question=asked,
+        parsed_answer=report,
+        citations=[item.evidence_id for item in session.evidence],
+        verdicts=[item.verdict for item in session.verdicts],
+        gaps=list(session.gaps),
+    )
     return CycleResult(
         question=asked,
-        report=session.report or cited_answer(asked, session),
+        report=report,
         sufficient_evidence=supported and not session.gaps,
         steps=tuple(session.steps),
         gaps=tuple(session.gaps),
@@ -265,6 +277,7 @@ def _cycle_snapshot(asked: str, session: ResearchState) -> CycleResult:
         cost=session.cost,
         action=action,
         coordination=dict(session.coordination) if session.coordination else None,
+        ledger=tuple(dict(item) for item in session.ledger),
     )
 
 
