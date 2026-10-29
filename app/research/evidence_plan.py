@@ -119,7 +119,11 @@ class EvidenceDrivenPlanner:
             reason = designed.reason
         if strategy is not None:
             action = strategy.recommend(
-                classify_situation(gaps=signals.gaps, conflicts=signals.contradictions),
+                classify_situation(
+                    gaps=signals.gaps,
+                    conflicts=signals.contradictions,
+                    remaining_budget=remaining_budget,
+                ),
                 action,
             )
             if action == "stop":

@@ -440,13 +440,13 @@ class CoordinateRequest(BaseModel):
 
 
 class StrategyObserveRequest(BaseModel):
-    situation: str = Field(min_length=1, max_length=32)
+    situation: str = Field(min_length=1, max_length=64)
     action: str = Field(min_length=1, max_length=64)
     reward: float = Field(ge=0, le=1)
 
 
 class StrategyRecommendRequest(BaseModel):
-    situation: str = Field(min_length=1, max_length=32)
+    situation: str = Field(min_length=1, max_length=64)
     fallback: str = "stop"
 
 

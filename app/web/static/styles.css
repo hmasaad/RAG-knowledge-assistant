@@ -177,6 +177,13 @@ button.danger {
   font-size: 0.9rem;
 }
 
+.list .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
 .split {
   display: grid;
   grid-template-columns: 1.3fr 0.9fr;

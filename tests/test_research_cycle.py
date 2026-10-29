@@ -15,6 +15,7 @@ from app.research.contracts import (
     EvidenceRef,
     ResearchState,
 )
+from app.research.adapters import cited_answer
 from app.research.cycle import run_cycle
 from app.research.dispatcher import ActionDispatcher
 
@@ -132,3 +133,61 @@ def test_research_cycle_fills_gaps_then_synthesizes(client: TestClient) -> None:
     assert SYNTHESIZE in body["decisions"]
     assert any("wifi" in gap for gap in body["gaps"])
     assert "retry.py" in body["report"]
+
+
+def test_research_cycle_answers_a_section_question(client: TestClient) -> None:
+    payload = (
+        b"# Customer App Requirements\n\n"
+        b"## 4.1 Authentication & Profile\n\n"
+        b"Sign up and sign in with email or phone. Edit name, photo, and saved salons.\n"
+    )
+    uploaded = client.post(
+        "/api/documents",
+        files={"file": ("salon-requirements.md", payload, "text/markdown")},
+    )
+    response = client.post(
+        "/api/research/cycle",
+        json={
+            "question": "Can you breakdown Authentication & Profile so that i can understand it properly?",
+            "top_k": 4,
+        },
+    )
+    body = response.json()
+
+    assert uploaded.status_code == 201
+    assert response.status_code == 200
+    assert body["action"] == "research"
+    assert "Sign up and sign in" in body["report"]
+    assert body["report"] != "I don't have enough evidence to answer."
+    assert not any("Authentication" in gap for gap in body["gaps"])
+
+
+def test_cited_answer_keeps_a_compact_on_topic_report() -> None:
+    state = ResearchState(
+        evidence=[
+            EvidenceRef(
+                "e1",
+                "d1",
+                "salon.pdf",
+                "Salon Booking App — Requirements Specification Page 3 4.8 Notifications "
+                "Push notifications for booking confirmation.",
+            ),
+            EvidenceRef(
+                "e2",
+                "d1",
+                "salon.pdf",
+                "4.3 Salon management portal Staff can manage appointments, services, "
+                "and schedules from the management portal.",
+            ),
+        ],
+        verdicts=[
+            ClaimVerdict("Explain Salon management portal?", "supported", ("e1", "e2")),
+        ],
+    )
+
+    report = cited_answer("Explain Salon management portal?", state)
+
+    assert report.count("[") <= 8
+    assert "management portal" in report
+    assert "Notifications" not in report
+    assert "Page 3" not in report

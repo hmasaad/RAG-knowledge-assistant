@@ -6,18 +6,36 @@ from app.retrieval.text import content_tokens
 
 CLARIFICATION_TEXT = "Which document or topic should I search?"
 _VAGUE = {"help", "please", "something", "anything", "this", "that", "it"}
-_OVERVIEW = {
+_OVERVIEW_INTENT = {
     "about",
     "contents",
     "describe",
-    "document",
     "explain",
-    "file",
+    "list",
+    "outline",
     "overview",
-    "pdf",
-    "say",
     "summarize",
     "summary",
+}
+_OVERVIEW = _OVERVIEW_INTENT | {
+    "all",
+    "app",
+    "document",
+    "entire",
+    "file",
+    "full",
+    "give",
+    "me",
+    "pdf",
+    "requirement",
+    "requirements",
+    "say",
+    "scope",
+    "show",
+    "spec",
+    "specification",
+    "srs",
+    "system",
     "tell",
     "what",
 }
@@ -31,10 +49,23 @@ def needs_clarification(question: str) -> bool:
     return all(token in _VAGUE for token in tokens)
 
 
+def wants_section_summary(question: str) -> bool:
+    """True when the asker wants a section explained, listed, or summarized."""
+    tokens = set(content_tokens(question))
+    if tokens & _OVERVIEW_INTENT or "breakdown" in tokens:
+        return True
+    folded = question.casefold()
+    return folded.startswith("what are") or (
+        "what" in tokens and "requirements" in tokens
+    )
+
+
 def is_document_overview(question: str) -> bool:
     """True when the asker wants a summary of the indexed file, not a specific fact."""
     tokens = content_tokens(question)
-    return bool(tokens) and all(token in _OVERVIEW or token in _VAGUE for token in tokens)
+    if not tokens or not all(token in _OVERVIEW or token in _VAGUE for token in tokens):
+        return False
+    return any(token in _OVERVIEW_INTENT or token in {"what", "tell", "say"} for token in tokens)
 
 
 def reformulate(question: str) -> str | None:

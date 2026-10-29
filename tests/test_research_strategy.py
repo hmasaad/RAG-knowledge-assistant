@@ -5,7 +5,18 @@ from fastapi.testclient import TestClient
 from app.research.autonomous import AutonomousPlanner
 from app.research.contracts import FILL_GAPS, RESOLVE_CONTRADICTIONS
 from app.research.loop import PROBE_CONFLICT, RETRY, LoopState, decide
-from app.research.strategy import CONFLICT, GAP, StrategyMemory, classify_situation
+from app.research.strategy import (
+    AMPLE,
+    CATALOG,
+    COMPARE,
+    CONFLICT,
+    FACT,
+    GAP,
+    TIGHT,
+    StrategyMemory,
+    classify_situation,
+    question_kind,
+)
 
 
 def test_empty_memory_keeps_the_fallback_action() -> None:
@@ -15,6 +26,19 @@ def test_empty_memory_keeps_the_fallback_action() -> None:
     assert memory.recommend(CONFLICT, RESOLVE_CONTRADICTIONS) == RESOLVE_CONTRADICTIONS
     assert classify_situation(gaps=("wifi",)) == GAP
     assert classify_situation(conflicts=("disagree",)) == CONFLICT
+    assert question_kind("which file implements the retry logic") == FACT
+    assert question_kind("which file implements the retry logic and where are timeouts configured") == COMPARE
+    assert question_kind("which documents or files do I have") == CATALOG
+    assert classify_situation(
+        gaps=("wifi",),
+        question="what is the office wifi password",
+        remaining_budget=1,
+    ) == f"{GAP}|{FACT}|{TIGHT}"
+    assert classify_situation(
+        gaps=("wifi",),
+        question="which file implements the retry logic and where are timeouts configured",
+        remaining_budget=4,
+    ) == f"{GAP}|{COMPARE}|{AMPLE}"
 
 
 def test_two_wins_override_the_fallback() -> None:
@@ -25,6 +49,18 @@ def test_two_wins_override_the_fallback() -> None:
     memory.observe(GAP, FILL_GAPS, 0.0)
 
     assert memory.recommend(GAP, FILL_GAPS) == RESOLVE_CONTRADICTIONS
+
+
+def test_specific_budget_beats_the_generic_gap_action() -> None:
+    memory = StrategyMemory()
+    memory.observe(GAP, FILL_GAPS, 1.0)
+    memory.observe(GAP, FILL_GAPS, 1.0)
+    tight = f"{GAP}|{FACT}|{TIGHT}"
+    memory.observe(tight, "stop", 1.0)
+    memory.observe(tight, "stop", 1.0)
+
+    assert memory.recommend(tight, FILL_GAPS) == "stop"
+    assert memory.recommend(f"{GAP}|{FACT}|{AMPLE}", FILL_GAPS) == FILL_GAPS
 
 
 def test_denied_actions_are_never_recommended() -> None:

@@ -170,6 +170,22 @@ class ResearchSessionStore:
             ).fetchall()
         return [_session(row) for row in rows]
 
+    def delete(self, session_id: str) -> bool:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM research_action_log WHERE session_id = ?",
+                (session_id,),
+            )
+            connection.execute(
+                "DELETE FROM research_side_effects WHERE session_id = ?",
+                (session_id,),
+            )
+            deleted = connection.execute(
+                "DELETE FROM research_sessions WHERE id = ?",
+                (session_id,),
+            ).rowcount
+        return deleted > 0
+
     def save_progress(self, session_id: str, state: ResearchState) -> None:
         self.persist_step(session_id, state)
 

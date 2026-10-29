@@ -87,28 +87,71 @@ def tool_action_adapters(registry: ToolRegistry, *, user_id: str = "local") -> l
 
 
 def cited_answer(question: str, state: ResearchState) -> str:
-    """Build a cited answer from supported claims and their passages."""
+    """Build a short cited report from the passages that best match the question."""
+    from app.generation.agent import wants_section_summary
+    from app.generation.answerers import _section_points, numbered_list
+    from app.retrieval.text import content_tokens, focus_tokens
+
     supported = [item for item in state.verdicts if item.verdict == "supported"]
     by_id = {item.evidence_id: item for item in state.evidence}
-    lines: list[str] = []
+    focus = tuple(focus_tokens(question))
+    scored: list[tuple[int, str]] = []
     seen: set[str] = set()
-    marker = 0
     for verdict in supported:
         for evidence_id in verdict.evidence_ids:
             passage = by_id.get(evidence_id)
             if passage is None or passage.evidence_id in seen:
                 continue
             seen.add(passage.evidence_id)
-            marker += 1
-            sentence = _first_sentence(passage.text)
-            lines.append(f"{sentence} [{marker}]")
-    if not lines:
+            sentence = _quoted_evidence(question, passage.text)
+            if not sentence:
+                continue
+            overlap = len(set(focus) & set(content_tokens(sentence)))
+            if overlap < 1:
+                continue
+            scored.append((overlap, sentence))
+    scored.sort(key=lambda item: (-item[0], len(item[1])))
+    lines = []
+    used: set[str] = set()
+    limit = 8 if wants_section_summary(question) else 2
+    ordered: list[tuple[str, int]] = []
+    if wants_section_summary(question):
+        marker = 0
+        for verdict in supported:
+            for evidence_id in verdict.evidence_ids:
+                passage = by_id.get(evidence_id)
+                if passage is None:
+                    continue
+                marker += 1
+                for point in _section_points(passage.text, focus):
+                    key = point.casefold()
+                    if key in used:
+                        continue
+                    used.add(key)
+                    ordered.append((point, marker))
+                    if len(ordered) >= limit:
+                        break
+                if len(ordered) >= limit:
+                    break
+            if len(ordered) >= limit:
+                break
+    if not ordered:
+        for overlap, sentence in scored:
+            key = sentence.casefold()
+            if key in used:
+                continue
+            used.add(key)
+            ordered.append((sentence, len(ordered) + 1))
+            if len(ordered) >= limit:
+                break
+    if not ordered:
         from app.security.prompts import REFUSAL_TEXT
 
         return REFUSAL_TEXT
+    text = numbered_list(ordered)
     if state.contradictions:
-        lines.append("The documents disagree.")
-    return " ".join(lines)
+        text = f"{text}\nThe documents disagree."
+    return text
 
 
 def from_search(registry: ToolRegistry, action: str, request: ActionRequest) -> ActionOutcome:
@@ -139,6 +182,16 @@ def from_search(registry: ToolRegistry, action: str, request: ActionRequest) -> 
         provenance=tuple(item.evidence_id for item in evidence),
         cost=1,
     )
+
+
+def _quoted_evidence(question: str, text: str) -> str:
+    from app.generation.answerers import topic_excerpt
+    from app.retrieval.text import focus_tokens
+    from app.security.content import neutralize_untrusted_text
+
+    safe = neutralize_untrusted_text(text).text or text
+    excerpt = topic_excerpt(safe, tuple(focus_tokens(question)))
+    return excerpt
 
 
 def _first_sentence(text: str) -> str:

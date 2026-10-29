@@ -78,7 +78,7 @@ Send `X-User-Id` (default `local`). Private docs are owner-only; shared docs are
 
 1. **Index** — parse, chunk, embed, store vectors and original bytes.
 2. **Ask** — retrieve, then answer only from passages that cover the question.
-3. **Research** — split the question, search clauses in parallel, verify claims, fill gaps, keep contradictions, synthesize a report. Sessions survive a restart.
+3. **Research** — split the question, search clauses in parallel, verify claims, fill gaps, keep contradictions, synthesize a report. Sessions survive a restart. After two similar outcomes, strategy learning prefers the action that worked for that evidence state, question kind, and remaining budget. The first plan stays fixed; guardrails still win.
 4. **Guardrails** — no citation or a bad citation becomes a refuse. Prompt-injection lines are stripped. Secrets from another user's docs are not returned.
 
 ```

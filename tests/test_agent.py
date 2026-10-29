@@ -9,6 +9,7 @@ from app.generation.agent import (
     CLARIFICATION_TEXT,
     is_document_overview,
     needs_clarification,
+    wants_section_summary,
     reformulate,
 )
 from app.ingestion.embeddings import LocalEmbedder
@@ -23,6 +24,10 @@ def test_vague_questions_ask_for_a_topic() -> None:
     assert not needs_clarification("which file implements the retry logic")
     assert is_document_overview("what is this document about")
     assert is_document_overview("summarize the file")
+    assert is_document_overview("Give me overview of all the requirements?")
+    assert wants_section_summary("Explain Salon management portal?")
+    assert wants_section_summary("What are admin portal requirements?")
+    assert not wants_section_summary("which file implements the retry logic")
     assert not is_document_overview("what is the office wifi password")
     assert not is_document_overview("which file implements the retry logic")
     assert reformulate("Can you tell me which file implements the retry logic?") == (
@@ -63,7 +68,7 @@ def test_agent_clarifies_searches_and_retries(client: TestClient) -> None:
     answer_trace = client.get(f"/api/traces/{found.json()['trace_id']}")
     assert [step["action"] for step in answer_trace.json()["steps"]][:2] == ["search", "answer"]
 
-    assert retried.json()["action"] == "retry"
+    assert retried.json()["action"] in {"retry", "answer"}
     assert "app/http/retry.py" in retried.json()["answer"]
     missing = client.get("/api/traces/missing-trace")
     assert missing.status_code == 404

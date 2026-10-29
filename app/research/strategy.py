@@ -8,12 +8,19 @@ from pathlib import Path
 
 from app.generation.grounding import is_refusal
 from app.research.contracts import FILL_GAPS, RESOLVE_CONTRADICTIONS, REVERIFY
+from app.research.planner import select_tools, subquestions
 
 GAP = "gap"
 CONFLICT = "conflict"
 COMPLETE = "complete"
 UNSUPPORTED = "unsupported"
+FACT = "fact"
+COMPARE = "compare"
+CATALOG = "catalog"
+TIGHT = "tight"
+AMPLE = "ok"
 MIN_SAMPLES = 2
+TIGHT_BUDGET = 1
 ALLOWED = frozenset({FILL_GAPS, RESOLVE_CONTRADICTIONS, REVERIFY, "stop"})
 
 _DECISION_ACTIONS = {
@@ -62,19 +69,50 @@ class StrategyStat:
         return payload
 
 
+def question_kind(question: str) -> str:
+    asked = question.strip()
+    if not asked:
+        return FACT
+    if "catalog" in select_tools(asked):
+        return CATALOG
+    if len(subquestions(asked)) > 1:
+        return COMPARE
+    return FACT
+
+
+def budget_band(remaining: int) -> str:
+    return TIGHT if remaining <= TIGHT_BUDGET else AMPLE
+
+
+def situation_keys(situation: str) -> tuple[str, ...]:
+    parts = [part for part in (situation or "").split("|") if part]
+    if not parts:
+        return (UNSUPPORTED,)
+    return tuple("|".join(parts[:index]) for index in range(len(parts), 0, -1))
+
+
 def classify_situation(
     *,
     gaps: tuple[str, ...] | list[str] = (),
     conflicts: tuple | list = (),
     sufficient: bool = False,
+    question: str = "",
+    remaining_budget: int | None = None,
 ) -> str:
     if conflicts:
-        return CONFLICT
-    if gaps:
-        return GAP
-    if sufficient:
-        return COMPLETE
-    return UNSUPPORTED
+        evidence = CONFLICT
+    elif gaps:
+        evidence = GAP
+    elif sufficient:
+        evidence = COMPLETE
+    else:
+        evidence = UNSUPPORTED
+    parts = [evidence]
+    if question.strip():
+        parts.append(question_kind(question))
+    if remaining_budget is not None:
+        parts.append(budget_band(remaining_budget))
+    return "|".join(parts)
 
 
 def action_from_report(report) -> str:
@@ -126,11 +164,14 @@ class StrategyMemory:
             return updated
 
     def learn(self, report) -> StrategyStat:
+        remaining = getattr(report, "remaining_budget", None)
         return self.observe(
             classify_situation(
                 gaps=tuple(getattr(report, "gaps", ()) or ()),
                 conflicts=tuple(getattr(report, "conflicts", ()) or getattr(report, "contradictions", ()) or ()),
                 sufficient=bool(getattr(report, "sufficient_evidence", False)),
+                question=str(getattr(report, "question", "") or ""),
+                remaining_budget=None if remaining is None else int(remaining),
             ),
             action_from_report(report),
             reward_from_report(report),
@@ -146,16 +187,17 @@ class StrategyMemory:
         allowed = {item for item in ALLOWED if item not in denied}
         default = fallback if fallback in allowed else ("stop" if "stop" in allowed else fallback)
         with self._lock:
-            scored: list[tuple[float, int, str]] = []
-            for action in allowed:
-                row = self._row(situation, action)
-                if row.samples < MIN_SAMPLES:
-                    continue
-                scored.append((row.score, row.wins, action))
-        if not scored:
-            return default
-        scored.sort(reverse=True)
-        return scored[0][2]
+            for key in situation_keys(situation):
+                scored: list[tuple[float, int, str]] = []
+                for action in allowed:
+                    row = self._row(key, action)
+                    if row.samples < MIN_SAMPLES:
+                        continue
+                    scored.append((row.score, row.wins, action))
+                if scored:
+                    scored.sort(reverse=True)
+                    return scored[0][2]
+        return default
 
     def snapshot(self) -> list[StrategyStat]:
         with self._lock:

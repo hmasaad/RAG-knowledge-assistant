@@ -30,6 +30,14 @@ def test_claim_verification_scores_support() -> None:
     assert unsupported.support is not None and unsupported.support < 0.6
     assert unverifiable.verdict == "unverifiable"
     assert unverifiable.support is None
+    section = assess_claim(
+        "Can you breakdown Authentication & Profile so that i can understand it properly?",
+        _passage(
+            "4.1 Authentication & Profile Sign up and sign in with email or phone.",
+            filename="salon.pdf",
+        ),
+    )
+    assert section.verdict == "supported"
 
 
 def test_contradictions_require_different_files_and_numbers() -> None:

@@ -91,8 +91,8 @@ def evaluate_research(
     judged = spec if spec is not None else _observed_spec(report)
     text = getattr(report, "report", "") or ""
     citations = list(getattr(report, "citations", []) or [])
-    quotes = [getattr(item, "quote", "") for item in citations]
-    cited = [(getattr(item, "filename", ""), getattr(item, "quote", "")) for item in citations]
+    cited = _citation_passages(report, citations)
+    quotes = [text for _, text in cited]
     claims = tuple(_score_claims(text, cited, set(judged.relevant), judged.expect_answer))
     faith = _faithfulness(text, quotes)
     cites = _citation_correctness(text, cited, set(judged.relevant), judged.expect_answer)
@@ -219,6 +219,25 @@ def _observed_spec(report) -> ResearchQualitySpec:
             getattr(item, "filename", "") for item in getattr(report, "citations", []) or []
         ),
     )
+
+
+def _citation_passages(report, citations) -> list[tuple[str, str]]:
+    passages = list(getattr(report, "passages", []) or [])
+    by_chunk = {
+        getattr(getattr(item, "source", None), "chunk_id", ""): item
+        for item in passages
+    }
+    cited: list[tuple[str, str]] = []
+    for item in citations:
+        filename = getattr(item, "filename", "") or ""
+        quote = getattr(item, "quote", "") or ""
+        passage = by_chunk.get(getattr(item, "chunk_id", ""), None)
+        if passage is not None:
+            text = passage.model_text() if hasattr(passage, "model_text") else getattr(passage, "text", "")
+            if text:
+                quote = text
+        cited.append((filename, quote))
+    return cited
 
 
 def _score_claims(

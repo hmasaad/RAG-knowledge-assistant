@@ -152,6 +152,19 @@ def test_research_cycle_persists_and_can_be_fetched(client: TestClient) -> None:
     assert resumed.json()["report"] == body["report"]
     assert stranger.status_code == 404
 
+    removed = client.delete(f"/api/research/sessions/{body['session_id']}")
+    listed_after = client.get("/api/research/sessions")
+    missing = client.get(f"/api/research/sessions/{body['session_id']}")
+    stranger_delete = client.delete(
+        f"/api/research/sessions/{body['session_id']}",
+        headers={"X-User-Id": "other"},
+    )
+
+    assert removed.status_code == 204
+    assert listed_after.json()["sessions"] == []
+    assert missing.status_code == 404
+    assert stranger_delete.status_code == 404
+
 
 def test_background_cycle_runs_on_the_worker(tmp_path: Path) -> None:
     settings = _background_settings(tmp_path)

@@ -294,6 +294,15 @@ def cancel_research_session(
     return _research_response(services.research.cancel(session_id, user_id=user_id))
 
 
+@router.delete("/research/sessions/{session_id}", status_code=204)
+def delete_research_session(
+    session_id: str,
+    services: Services = Depends(get_services),
+    user_id: str = Depends(get_user_id),
+) -> None:
+    services.research.delete_session(session_id, user_id=user_id)
+
+
 def _research_response(result) -> ResearchResponse:
     return ResearchResponse(
         question=result.question,

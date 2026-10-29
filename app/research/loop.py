@@ -30,6 +30,7 @@ class LoopState:
     quality_reason: str = ""
     quality_failures: tuple[str, ...] = ()
     spent_cost: int = 0
+    question: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,8 @@ def decide(
                 gaps=state.gaps,
                 conflicts=state.unresolved_conflicts,
                 sufficient=state.complete,
+                question=state.question,
+                remaining_budget=state.remaining_budget,
             ),
             quality_action or "stop",
         )

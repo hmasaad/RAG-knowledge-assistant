@@ -1,5 +1,6 @@
 """Fuse vector and lexical rankings, then rerank by term coverage."""
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -85,8 +86,14 @@ def rank_chunks(
         hit = catalog[chunk_id]
         safe = sanitized[chunk_id]
         coverage, matched = _coverage(query_tokens, content_tokens(safe.text))
+        heading_hit = heading_overlap(str(hit.metadata.get("heading") or ""), query_tokens)
         normalized = fused_score / peak_fused if peak_fused else 0.0
-        score = (1 - coverage_weight) * normalized + coverage_weight * coverage
+        score = (
+            (1 - coverage_weight) * normalized
+            + coverage_weight * coverage
+            + 0.4 * heading_hit
+            - _banner_penalty(safe.text)
+        )
         ranked.append(
             RankedChunk(
                 chunk_id=chunk_id,
@@ -152,6 +159,23 @@ def merge_query_rankings(
         )
     merged.sort(key=lambda item: (-item.score, -item.vector_score, item.chunk_id))
     return merged
+
+
+_BANNER = re.compile(r"(?i)requirements specification\s+page\s+\d+")
+
+
+def _banner_penalty(text: str) -> float:
+    lead = (text or "")[:180]
+    if _BANNER.search(lead):
+        return 0.2
+    return 0.0
+
+
+def heading_overlap(heading: str, query_tokens: list[str]) -> float:
+    asked = list(dict.fromkeys(query_tokens))
+    if not asked:
+        return 0.0
+    return len(set(content_tokens(heading or "")) & set(asked)) / len(asked)
 
 
 def _coverage(query_tokens: list[str], passage_tokens: list[str]) -> tuple[float, tuple[str, ...]]:

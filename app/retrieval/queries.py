@@ -2,7 +2,12 @@
 
 import re
 
-from app.retrieval.text import content_tokens
+from app.retrieval.text import content_tokens, focus_tokens
+
+_TOPIC_ALIASES = (
+    (("admin", "portal"), ("admin portal", "web admin", "platform admin", "management portal")),
+    (("management", "portal"), ("management portal", "salon management portal")),
+)
 
 _PREFIXES = (
     "please ",
@@ -48,6 +53,16 @@ def decompose_query(question: str) -> tuple[str, ...]:
     if len(kept) < 2:
         return ()
     return tuple(dict.fromkeys(kept))
+
+
+def extra_topic_queries(question: str) -> tuple[str, ...]:
+    """Alias searches when the question names a known section in other words."""
+    tokens = set(focus_tokens(question))
+    extras: list[str] = []
+    for needed, aliases in _TOPIC_ALIASES:
+        if set(needed) <= tokens:
+            extras.extend(aliases)
+    return tuple(dict.fromkeys(extras))
 
 
 def plan_searches(

@@ -142,7 +142,12 @@ class AutonomousPlanner:
         denied = self.guardrails.policy.denied_actions
         if self.strategy is not None:
             action = self.strategy.recommend(
-                classify_situation(gaps=gaps, conflicts=conflicts),
+                classify_situation(
+                    gaps=gaps,
+                    conflicts=conflicts,
+                    question=plan.question,
+                    remaining_budget=remaining_budget,
+                ),
                 action,
                 denied=denied,
             )
@@ -448,7 +453,13 @@ class AutonomousPlanner:
         return False
 
 
-def _revise_action(state: ResearchState, strategy: StrategyMemory | None) -> str:
+def _revise_action(
+    state: ResearchState,
+    strategy: StrategyMemory | None,
+    *,
+    remaining_budget: int | None = None,
+    question: str = "",
+) -> str:
     if state.contradictions:
         fallback = RESOLVE_CONTRADICTIONS
     elif state.gaps:
@@ -457,7 +468,18 @@ def _revise_action(state: ResearchState, strategy: StrategyMemory | None) -> str
         fallback = "stop"
     if strategy is None:
         return fallback
-    return strategy.recommend(classify_situation(gaps=state.gaps, conflicts=state.contradictions), fallback)
+    leftover = remaining_budget
+    if leftover is None:
+        leftover = max(0, 16 - int(getattr(state, "cost", 0) or 0))
+    return strategy.recommend(
+        classify_situation(
+            gaps=state.gaps,
+            conflicts=state.contradictions,
+            question=question,
+            remaining_budget=leftover,
+        ),
+        fallback,
+    )
 
 
 def _replan_reason(action: str, state: ResearchState) -> str:

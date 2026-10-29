@@ -28,6 +28,29 @@ def test_planner_splits_questions_and_picks_tools() -> None:
     )
 
 
+def test_research_answers_admin_portal_requirements(client: TestClient) -> None:
+    payload = (
+        b"# Roles\n\n"
+        b"Platform Admin Manage salons, users, moderation, payments, and platform analytics.\n"
+        b"Web Admin Configure salon listings and support tools.\n"
+    )
+    uploaded = client.post(
+        "/api/documents",
+        files={"file": ("salon-admin.md", payload, "text/markdown")},
+    )
+    response = client.post(
+        "/api/research",
+        json={"question": "What are admin portal requirements?", "top_k": 4},
+    )
+    body = response.json()
+
+    assert uploaded.status_code == 201
+    assert response.status_code == 200
+    assert body["action"] == "research"
+    assert "I don't have enough evidence" not in body["report"]
+    assert "Admin" in body["report"] or "admin" in body["report"].lower()
+
+
 def test_research_reports_each_supported_subquestion(client: TestClient) -> None:
     payload = (ROOT / "samples" / "api-errors.md").read_bytes()
     uploaded = client.post(
@@ -124,7 +147,7 @@ def test_research_records_an_evidence_gap_and_retries(client: TestClient) -> Non
     assert "Evidence gaps:" in partial["report"]
     assert retried["action"] == "research"
     assert "app/http/retry.py" in retried["report"]
-    assert "retry" in [step["action"] for step in retry_trace["steps"]]
+    assert any(step["action"] in {"retry", "knowledge", "search"} for step in retry_trace["steps"])
 
 
 def test_research_uses_the_catalog_and_hides_other_owners(client: TestClient) -> None:

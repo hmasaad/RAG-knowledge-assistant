@@ -1,7 +1,7 @@
 from app.retrieval.hybrid import reciprocal_rank_fusion
 from app.retrieval.inspect import covers_question
 from app.retrieval.lexical import bm25_scores
-from app.retrieval.text import content_tokens
+from app.retrieval.text import content_tokens, focus_tokens
 
 
 def test_bm25_prefers_the_document_that_shares_query_terms() -> None:
@@ -29,3 +29,6 @@ def test_coverage_inspection_rejects_unrelated_passages() -> None:
     assert covers_question(1.0, tuple(tokens), min_coverage=0.5)
     assert not covers_question(0.25, ("retry",), min_coverage=0.5)
     assert not covers_question(0.0, (), min_coverage=0.5)
+    assert focus_tokens(
+        "Can you breakdown Authentication & Profile so that i can understand it properly?"
+    ) == ["authentication", "profile"]

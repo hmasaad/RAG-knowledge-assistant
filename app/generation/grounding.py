@@ -3,7 +3,7 @@
 import re
 
 from app.retrieval.search import RankedPassage
-from app.retrieval.text import content_tokens
+from app.retrieval.text import content_tokens, focus_tokens
 from app.security.prompts import REFUSAL_TEXT
 
 _MARKER = re.compile(r"\[(\d+)\]")
@@ -119,9 +119,15 @@ def claim_support(claim: str, passage: str) -> float | None:
     """
     tokens = [
         token
-        for token in content_tokens(claim)
+        for token in focus_tokens(claim)
         if len(token) >= 4 and token not in _BOILERPLATE
     ]
+    if not tokens:
+        tokens = [
+            token
+            for token in content_tokens(claim)
+            if len(token) >= 4 and token not in _BOILERPLATE
+        ]
     if not tokens:
         return None
     haystack = set(content_tokens(passage))

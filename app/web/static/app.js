@@ -234,6 +234,7 @@ async function refreshSessions() {
     const info = document.createElement("div");
     info.innerHTML = `<strong>${escapeHtml(session.question)}</strong><div class="meta">${escapeHtml(session.status)} · ${escapeHtml(session.session_id.slice(0, 8))}</div>`;
     const actions = document.createElement("div");
+    actions.className = "actions";
     const open = document.createElement("button");
     open.className = "ghost";
     open.textContent = "Open";
@@ -252,7 +253,19 @@ async function refreshSessions() {
       await showResearch(detail);
       refreshSessions();
     });
-    actions.append(open, resume);
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", async () => {
+      await request(`/api/research/sessions/${session.session_id}`, { method: "DELETE" });
+      if (researchStatus.textContent.includes(session.session_id)) {
+        researchResult.hidden = true;
+        researchResult.replaceChildren();
+        researchStatus.textContent = "Session deleted.";
+      }
+      refreshSessions();
+    });
+    actions.append(open, resume, remove);
     row.append(info, actions);
     sessionsEl.append(row);
   }

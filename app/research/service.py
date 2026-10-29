@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.generation.agent import CLARIFICATION_TEXT, needs_clarification, reformulate
 from app.generation.answerers import Answerer
-from app.generation.grounding import AnswerResult, Citation
+from app.generation.grounding import AnswerResult, Citation, interpret_model_answer
 from app.research.verification import (
     ClaimAssessment,
     Contradiction,
@@ -288,6 +288,7 @@ class ResearchService:
                 )
 
             decisions = self._adapt(
+                question=asked,
                 top_k=top_k,
                 caller=caller,
                 trace_id=trace_id,
@@ -371,6 +372,10 @@ class ResearchService:
             return ResearchStep(question, tool, "gap", error, completion, False)
         retrieved = as_retrieval(found)
         answer = self._answerer.generate(question, retrieved)
+        if not answer.sufficient_evidence:
+            rebuilt = _extractive_from_passages(question, retrieved)
+            if rebuilt is not None:
+                answer = rebuilt
         claims = verify_answer(answer)
         verified = bool(claims)
         self._traces.step(
@@ -537,6 +542,7 @@ class ResearchService:
     def _adapt(
         self,
         *,
+        question: str,
         top_k: int,
         caller: str,
         trace_id: str,
@@ -573,6 +579,7 @@ class ResearchService:
                 quality_action=quality_action,
                 quality_reason=quality_reason,
                 quality_failures=quality_failures,
+                question=question,
             )
             choice = decide(state, strategy=self._strategy)
             decisions.append(choice)
@@ -820,6 +827,12 @@ class ResearchService:
     def list_sessions(self, *, user_id: str | None = None) -> list[ResearchSession]:
         caller = user_id or self._default_user_id
         return self._sessions.list_for_user(caller)
+
+    def delete_session(self, session_id: str, *, user_id: str | None = None) -> None:
+        session = self._owned_session(session_id, user_id)
+        if session.status in {"queued", "running"}:
+            self._state.cancel(session.id)
+        self._sessions.delete(session.id)
 
     def session_audit(self, session_id: str, *, user_id: str | None = None) -> dict:
         session = self._owned_session(session_id, user_id)
@@ -1214,6 +1227,7 @@ def _loop_state(
     quality_action: str = "",
     quality_reason: str = "",
     quality_failures: tuple[str, ...] = (),
+    question: str = "",
 ) -> LoopState:
     verified = [step for step in steps if step.status in {"supported", "contradicted"}]
     files = {record.source.filename for record in store.records}
@@ -1231,6 +1245,7 @@ def _loop_state(
         quality_action=quality_action,
         quality_reason=quality_reason,
         quality_failures=quality_failures,
+        question=question,
     )
 
 
@@ -1474,6 +1489,31 @@ def _quote(text: str) -> str:
     if len(stripped) <= _QUOTE_LIMIT:
         return stripped
     return stripped[: _QUOTE_LIMIT - 1].rstrip() + "…"
+
+
+def _extractive_from_passages(question: str, retrieved) -> AnswerResult | None:
+    from app.generation.answerers import topic_excerpt
+    from app.retrieval.text import content_tokens, focus_tokens
+
+    passages = list(getattr(retrieved, "passages", []) or [])
+    if not passages:
+        return None
+    ranked = sorted(
+        passages,
+        key=lambda item: (-len(item.matched_terms), item.rank),
+    )
+    passage = ranked[0]
+    focus = tuple(focus_tokens(question))
+    sentence = topic_excerpt(passage.model_text(), focus or passage.matched_terms)
+    if not sentence or not (set(focus) & set(content_tokens(sentence))):
+        return None
+    number = passages.index(passage) + 1
+    marker = f"[{number}]"
+    answer = sentence if marker in sentence else f"{sentence} {marker}"
+    result = interpret_model_answer(question, answer, passages)
+    if not result.sufficient_evidence:
+        return None
+    return result
 
 
 def _with_rank(passage: RankedPassage, rank: int) -> RankedPassage:

@@ -15,9 +15,10 @@ from app.retrieval.conflicts import documents_conflict
 from app.retrieval.hybrid import RankedChunk, merge_query_rankings, rank_chunks
 from app.retrieval.inspect import covers_question
 from app.retrieval.parents import expand_parents
-from app.retrieval.queries import plan_searches
+from app.retrieval.sections import heading_overlap, promote_heading_matches
+from app.retrieval.queries import extra_topic_queries, plan_searches
 from app.retrieval.rerank import Reranker, apply_rerank
-from app.retrieval.text import content_tokens
+from app.retrieval.text import content_tokens, focus_tokens
 from app.security.leakage import sensitive_tokens
 
 
@@ -150,13 +151,13 @@ class SearchService:
 
         started = time.perf_counter()
         try:
-            candidate_k = max(self._candidate_k, top_k)
             chunks = expand_parents(
                 _keep_versions(
                     self._vectors.list_chunks(document_ids=document_ids),
                     versions,
                 )
             )
+            candidate_k = min(100, max(self._candidate_k, top_k, 10 + len(chunks) // 8))
             groups: list[list[RankedChunk]] = []
             vector_hits: list = []
             for search_query in searches:
@@ -174,7 +175,7 @@ class SearchService:
                     vector_hits = hits
                 groups.append(
                     rank_chunks(
-                        query_tokens=content_tokens(search_query),
+                        query_tokens=focus_tokens(search_query) or content_tokens(search_query),
                         vector_hits=hits,
                         chunks=chunks,
                         candidate_k=candidate_k,
@@ -184,11 +185,13 @@ class SearchService:
                 )
             ranked = merge_query_rankings(
                 groups,
-                query_tokens=content_tokens(focus),
+                query_tokens=focus_tokens(focus) or content_tokens(focus),
                 rrf_k=self._rrf_k,
             )
             if self._reranker is not None:
                 ranked = apply_rerank(focus, ranked, self._reranker)
+            topic = focus_tokens(focus) or content_tokens(focus)
+            ranked = promote_heading_matches(ranked, chunks, topic, limit=max(top_k, 8))
         except KnowledgeError:
             raise
         except Exception as exc:
@@ -200,9 +203,13 @@ class SearchService:
             )
             raise KnowledgeError("Retrieval failed.", status_code=503) from exc
 
+        window = top_k
+        topic = focus_tokens(focus) or content_tokens(focus)
+        if any(heading_overlap(str(chunk.metadata.get("heading") or ""), topic) for chunk in ranked[:12]):
+            window = max(top_k, min(8, len(ranked)))
         passages = [
             _passage(rank, chunk, min_coverage=self._min_coverage)
-            for rank, chunk in enumerate(ranked[:top_k], start=1)
+            for rank, chunk in enumerate(ranked[:window], start=1)
         ]
         sufficient, inspection = _inspection(passages)
         conflict = documents_conflict(
@@ -250,11 +257,11 @@ class SearchService:
         return self._metadata.readable_versions(user_id)
 
     def _searches(self, question: str, document_ids: set[str] | None) -> tuple[str, ...]:
-        extra: tuple[str, ...] = ()
+        extra: tuple[str, ...] = extra_topic_queries(question)
         if self._knowledge_graph and self._metadata is not None:
             names = path_entities(question)
             if names:
-                extra = tuple(self._metadata.neighbors(names, document_ids)[:4])
+                extra = extra + tuple(self._metadata.neighbors(names, document_ids)[:4])
         return plan_searches(
             question,
             rewrite=self._rewrite,

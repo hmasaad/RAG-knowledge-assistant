@@ -1,8 +1,21 @@
 """Query rewriting, decomposition, and multi-query retrieval."""
 
 from app.ingestion.vector_store import VectorHit
-from app.retrieval.queries import decompose_query, plan_searches, rewrite_query
+from app.retrieval.queries import (
+    decompose_query,
+    extra_topic_queries,
+    plan_searches,
+    rewrite_query,
+)
 from app.retrieval.search import SearchService
+
+
+def test_admin_portal_adds_section_aliases() -> None:
+    extras = extra_topic_queries("What are admin portal requirements?")
+
+    assert "web admin" in extras
+    assert "platform admin" in extras
+    assert extra_topic_queries("which file implements the retry logic") == ()
 
 
 def test_rewrite_drops_politeness() -> None:
