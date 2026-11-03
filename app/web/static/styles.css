@@ -119,6 +119,13 @@ button.danger {
   background: var(--card);
 }
 
+.tab-link {
+  display: inline-block;
+  padding: 0.6rem 1rem;
+  color: var(--ink);
+  text-decoration: none;
+}
+
 .panel {
   display: none;
   padding-bottom: 3rem;

@@ -15,6 +15,7 @@ from app.api.embeddings import router as embeddings_router
 from app.api.operations import router as operations_router
 from app.api.research import router as research_router
 from app.api.search import router as search_router
+from app.api.trace import router as trace_router
 from app.config import Settings, get_settings
 from app.generation.answerers import Answerer
 from app.ingestion.embeddings import Embedder
@@ -117,6 +118,7 @@ def create_app(
     application.include_router(answer_router, prefix="/api")
     application.include_router(claims_router, prefix="/api")
     application.include_router(research_router, prefix="/api")
+    application.include_router(trace_router, prefix="/api")
     application.include_router(operations_router, prefix="/api")
     application.include_router(engineering_router, prefix="/api")
     mount_ui(application)

@@ -273,6 +273,7 @@ class GraphNodeResponse(BaseModel):
     page: int | None = None
     start_char: int = 0
     end_char: int = 0
+    recorded_at: str = ""
 
 
 class GraphEdgeResponse(BaseModel):

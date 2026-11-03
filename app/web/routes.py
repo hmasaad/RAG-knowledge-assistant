@@ -15,6 +15,11 @@ def ui_home() -> FileResponse:
     return FileResponse(STATIC / "index.html")
 
 
+@router.get("/trace", include_in_schema=False)
+def ui_trace() -> FileResponse:
+    return FileResponse(STATIC / "trace.html")
+
+
 def mount_ui(application) -> None:
     application.include_router(router)
     application.mount("/ui", StaticFiles(directory=STATIC), name="ui")

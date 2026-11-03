@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Source Trace Visualiser</title>
+    <link rel="stylesheet" href="/ui/trace.css" />
+  </head>
+  <body>
+    <div class="trace" id="trace">
+      <header class="bar">
+        <h1>Source Trace Visualiser</h1>
+        <div class="tools">
+          <label class="search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+            <input id="node-search" type="search" placeholder="Search nodes..." autocomplete="off" />
+          </label>
+          <button type="button" id="filter-btn" class="icon-btn" aria-label="Filter" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16l-6 8v5l-4 2v-7L4 5z"></path></svg>
+          </button>
+          <div id="filter-menu" class="popover" hidden>
+            <label><input id="show-chunks" type="checkbox" checked /> Chunks</label>
+            <label><input id="show-contradictions" type="checkbox" checked /> Contradictions</label>
+            <label><input id="show-entities" type="checkbox" /> Entities</label>
+          </div>
+          <button type="button" id="download-btn" class="icon-btn" aria-label="Download">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11"></path><path d="M7 11l5 5 5-5"></path><path d="M5 20h14"></path></svg>
+          </button>
+          <button type="button" id="expand-btn" class="icon-btn" aria-label="Expand">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5"></path><path d="M15 4h5v5"></path><path d="M9 20H4v-5"></path><path d="M15 20h5v-5"></path></svg>
+          </button>
+        </div>
+      </header>
+
+      <aside class="chat">
+        <div class="chat-head">
+          <div>
+            <h2>AI Chat Assistant</h2>
+            <p>Ask about your documents or this trace</p>
+          </div>
+          <button type="button" id="clear-chat" class="icon-btn" aria-label="Clear chat">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"></path><path d="M9 7V5h6v2"></path><path d="M8 7l1 13h6l1-13"></path></svg>
+          </button>
+        </div>
+        <div id="messages" class="messages"></div>
+        <form id="ask-form" class="composer">
+          <input id="ask-input" type="text" placeholder="Ask a question..." autocomplete="off" />
+          <button type="submit" aria-label="Send">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-2-6-8-2z"></path></svg>
+          </button>
+        </form>
+      </aside>
+
+      <section class="stage" aria-label="Evidence graph">
+        <svg id="graph" viewBox="0 0 1100 700" role="img"></svg>
+      </section>
+
+      <aside class="inspector" id="inspector">
+        <div class="inspector-head">
+          <div>
+            <h2 id="inspector-title">Aggregator</h2>
+            <p id="inspector-hint">Click on a claim to see its upstream sources</p>
+          </div>
+          <button type="button" id="close-inspector" class="icon-btn" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg>
+          </button>
+        </div>
+        <div id="inspector-body" class="inspector-body"></div>
+        <button type="button" id="clear-selection" class="clear">Clear Selection</button>
+      </aside>
+
+      <footer class="asset-bar">
+        <span class="asset-label">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16l5-5 4 4 7-8"></path></svg>
+          Assets:
+        </span>
+        <div id="asset-bar"></div>
+      </footer>
+    </div>
+    <script src="/ui/trace.js"></script>
+  </body>
+</html>

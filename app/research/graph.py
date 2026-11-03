@@ -1,7 +1,9 @@
-"""A traceable graph of claims, passages, documents, versions, and sources."""
+"""A traceable graph of claims, passages, documents, versions, sources, and entities."""
 
 import hashlib
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from app.ingestion.metadata_store import MetadataStore
 from app.research.evidence import EvidenceRecord
@@ -13,12 +15,15 @@ PASSAGE = "passage"
 DOCUMENT = "document"
 VERSION = "version"
 SOURCE = "source"
+ENTITY = "entity"
 SUPPORTS = "supports"
 CONTRADICTS = "contradicts"
 EXTRACTED_FROM = "extracted_from"
 HAS_SOURCE = "has_source"
 HAS_VERSION = "has_version"
 CITED_IN = "cited_in"
+MENTIONS = "mentions"
+SUPERSEDES = "supersedes"
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,35 @@ class Provenance:
     page: int | None = None
     start_char: int = 0
     end_char: int = 0
+    recorded_at: str = ""
+
+
+@dataclass(frozen=True)
+class ClaimCitation:
+    """The passage a claim cites, including the character span and version."""
+
+    claim_id: str
+    quote: str
+    document_id: str
+    filename: str
+    version: int
+    chunk_id: str
+    start_char: int
+    end_char: int
+    recorded_at: str = ""
+    marker: int | None = None
+
+
+@dataclass(frozen=True)
+class AuditEvent:
+    """One recorded decision: support, contradiction, citation, or refusal."""
+
+    id: str
+    decision: str
+    subject_id: str
+    evidence_ids: tuple[str, ...] = ()
+    detail: str = ""
+    recorded_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,11 +87,13 @@ class ProvenanceEdge:
 
 
 class EvidenceGraph:
-    """Directed graph used for multi-document research reports."""
+    """Directed graph of documents, chunks, claims, and the entities they name."""
 
     def __init__(self) -> None:
         self.nodes: dict[str, GraphNode] = {}
         self.edges: list[ProvenanceEdge] = []
+        self.citations: list[ClaimCitation] = []
+        self.audit: list[AuditEvent] = []
         self._seen: set[tuple[str, str, str]] = set()
 
     def add_node(self, node: GraphNode) -> GraphNode:
@@ -67,12 +103,13 @@ class EvidenceGraph:
             return node
         return existing
 
-    def add_edge(self, source: str, relation: str, target: str) -> None:
+    def add_edge(self, source: str, relation: str, target: str) -> bool:
         key = (source, relation, target)
         if key in self._seen or source not in self.nodes or target not in self.nodes:
-            return
+            return False
         self._seen.add(key)
         self.edges.append(ProvenanceEdge(source=source, relation=relation, target=target))
+        return True
 
     def neighbors(self, node_id: str, relation: str | None = None) -> list[GraphNode]:
         found: list[GraphNode] = []
@@ -89,6 +126,8 @@ class EvidenceGraph:
     def clear(self) -> None:
         self.nodes.clear()
         self.edges.clear()
+        self.citations.clear()
+        self.audit.clear()
         self._seen.clear()
 
     def claims(self) -> list[GraphNode]:
@@ -111,12 +150,39 @@ class EvidenceGraph:
                     "page": node.provenance.page,
                     "start_char": node.provenance.start_char,
                     "end_char": node.provenance.end_char,
+                    "recorded_at": node.provenance.recorded_at,
                 }
                 for node in self.nodes.values()
             ],
             "edges": [
                 {"source": edge.source, "relation": edge.relation, "target": edge.target}
                 for edge in self.edges
+            ],
+            "citations": [
+                {
+                    "claim_id": item.claim_id,
+                    "quote": item.quote,
+                    "document_id": item.document_id,
+                    "filename": item.filename,
+                    "version": item.version,
+                    "chunk_id": item.chunk_id,
+                    "start_char": item.start_char,
+                    "end_char": item.end_char,
+                    "recorded_at": item.recorded_at,
+                    "marker": item.marker,
+                }
+                for item in self.citations
+            ],
+            "audit": [
+                {
+                    "id": event.id,
+                    "decision": event.decision,
+                    "subject_id": event.subject_id,
+                    "evidence_ids": list(event.evidence_ids),
+                    "detail": event.detail,
+                    "recorded_at": event.recorded_at,
+                }
+                for event in self.audit
             ],
         }
 
@@ -171,6 +237,14 @@ class ProvenanceEngine:
         for verdict in getattr(outcome, "verdicts", ()):
             claim_id = f"claim:{_claim_key(verdict.claim)}"
             graph.add_node(GraphNode(id=claim_id, kind=CLAIM, label=verdict.claim))
+            decision = verdict.verdict or "recorded"
+            self.record_decision(
+                graph,
+                decision,
+                claim_id,
+                tuple(verdict.evidence_ids),
+                detail=verdict.claim,
+            )
             relation = CONTRADICTS if verdict.verdict == "contradicted" else SUPPORTS
             if verdict.verdict not in {"supported", "contradicted"}:
                 continue
@@ -196,6 +270,23 @@ class ProvenanceEngine:
             if conflict.left_claim_id and conflict.right_claim_id:
                 graph.add_edge(left, CONTRADICTS, right)
                 graph.add_edge(right, CONTRADICTS, left)
+                recorded_at = records[-1].created_at if records else ""
+                self.record_decision(
+                    graph,
+                    "contradicted",
+                    left,
+                    (right,),
+                    detail=conflict.summary,
+                    recorded_at=recorded_at,
+                )
+                self.record_decision(
+                    graph,
+                    "contradicted",
+                    right,
+                    (left,),
+                    detail=conflict.summary,
+                    recorded_at=recorded_at,
+                )
         return graph
 
     def from_verdict(self, verdict: JudgeVerdict) -> EvidenceGraph:
@@ -243,6 +334,15 @@ class ProvenanceEngine:
         self._attach_document(graph, origin)
         graph.add_edge(f"passage:{source.chunk_id}", relation, claim.id)
         graph.add_edge(claim.id, CITED_IN, f"document:{source.document_id}")
+        self._cite(graph, claim.id, record.claim, origin, record.created_at)
+        self.record_decision(
+            graph,
+            record.verdict or "supported",
+            claim.id,
+            (record.evidence_id,),
+            detail=f"Cited {origin.filename} v{origin.version} chars {origin.start_char}–{origin.end_char}",
+            recorded_at=record.created_at,
+        )
 
     def _add_item(self, graph: EvidenceGraph, claim_id: str, item: EvidenceItem, relation: str) -> None:
         origin = self._origin(
@@ -265,6 +365,15 @@ class ProvenanceEngine:
         self._attach_document(graph, origin)
         graph.add_edge(passage.id, relation, claim_id)
         graph.add_edge(claim_id, CITED_IN, f"document:{item.document_id}")
+        self._cite(graph, claim_id, item.text if hasattr(item, "text") else item.filename, origin)
+        self.record_decision(
+            graph,
+            "supported" if relation == SUPPORTS else "contradicted",
+            claim_id,
+            (item.evidence_id,),
+            detail=f"Cited {origin.filename} v{origin.version} chars {origin.start_char}–{origin.end_char}",
+            recorded_at=origin.recorded_at,
+        )
 
     def _attach_document(self, graph: EvidenceGraph, origin: Provenance) -> None:
         if not origin.document_id:
@@ -275,12 +384,6 @@ class ProvenanceEngine:
             label=origin.filename,
             provenance=origin,
         )
-        version = GraphNode(
-            id=f"version:{origin.document_id}:v{origin.version}",
-            kind=VERSION,
-            label=f"{origin.filename} v{origin.version}",
-            provenance=origin,
-        )
         source = GraphNode(
             id=f"source:{origin.chunk_id or origin.document_id}",
             kind=SOURCE,
@@ -288,12 +391,119 @@ class ProvenanceEngine:
             provenance=origin,
         )
         graph.add_node(document)
-        graph.add_node(version)
         graph.add_node(source)
         if origin.chunk_id:
             graph.add_edge(f"passage:{origin.chunk_id}", EXTRACTED_FROM, document.id)
             graph.add_edge(f"passage:{origin.chunk_id}", HAS_SOURCE, source.id)
-        graph.add_edge(document.id, HAS_VERSION, version.id)
+        versions = self._document_versions(origin)
+        for item in versions:
+            version_id = f"version:{origin.document_id}:v{item.version}"
+            graph.add_node(GraphNode(id=version_id, kind=VERSION, label=f"{item.filename} v{item.version}", provenance=item))
+            graph.add_edge(document.id, HAS_VERSION, version_id)
+        ordered = sorted(versions, key=lambda item: item.version)
+        for older, newer in zip(ordered, ordered[1:]):
+            newer_id = f"version:{origin.document_id}:v{newer.version}"
+            older_id = f"version:{origin.document_id}:v{older.version}"
+            if graph.add_edge(newer_id, SUPERSEDES, older_id):
+                self.record_decision(
+                    graph,
+                    "superseded",
+                    newer_id,
+                    (older_id,),
+                    detail=f"{newer.filename} v{newer.version} supersedes v{older.version}",
+                    recorded_at=newer.recorded_at,
+                )
+
+    def record_decision(
+        self,
+        graph: EvidenceGraph,
+        decision: str,
+        subject_id: str,
+        evidence_ids: tuple[str, ...] = (),
+        *,
+        detail: str = "",
+        recorded_at: str = "",
+    ) -> AuditEvent:
+        """Append one decision to the audit trail."""
+        event = AuditEvent(
+            id=f"audit-{len(graph.audit) + 1}",
+            decision=decision,
+            subject_id=subject_id,
+            evidence_ids=tuple(evidence_ids),
+            detail=detail,
+            recorded_at=recorded_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        )
+        graph.audit.append(event)
+        return event
+
+    def _cite(
+        self,
+        graph: EvidenceGraph,
+        claim_id: str,
+        quote: str,
+        origin: Provenance,
+        recorded_at: str = "",
+    ) -> None:
+        if any(item.claim_id == claim_id for item in graph.citations):
+            return
+        graph.citations.append(
+            ClaimCitation(
+                claim_id=claim_id,
+                quote=quote,
+                document_id=origin.document_id,
+                filename=origin.filename,
+                version=origin.version,
+                chunk_id=origin.chunk_id,
+                start_char=origin.start_char,
+                end_char=origin.end_char,
+                recorded_at=recorded_at or origin.recorded_at,
+            )
+        )
+
+    def _document_versions(self, origin: Provenance) -> list[Provenance]:
+        listed = []
+        list_versions = getattr(self._metadata, "list_versions", None)
+        if callable(list_versions):
+            try:
+                listed = list(list_versions(origin.document_id))
+            except Exception:
+                listed = []
+        if listed:
+            return [
+                Provenance(
+                    document_id=origin.document_id,
+                    version=item.version,
+                    filename=item.filename or origin.filename,
+                    content_type=item.content_type or origin.content_type,
+                    checksum=item.checksum,
+                    recorded_at=item.created_at,
+                )
+                for item in listed
+            ]
+        return [
+            Provenance(
+                document_id=origin.document_id,
+                version=origin.version,
+                filename=origin.filename,
+                content_type=origin.content_type,
+                checksum=origin.checksum,
+                recorded_at=origin.recorded_at,
+            )
+        ]
+
+    def attach_entities(self, graph: EvidenceGraph, names: list[str] | tuple[str, ...]) -> None:
+        """Connect claims that name an entity. Does not search or judge."""
+        for name in names:
+            cleaned = name.strip()
+            if not cleaned:
+                continue
+            slug = re.sub(r"[^a-z0-9]+", "-", cleaned.lower()).strip("-")
+            entity_id = f"entity:{slug}"
+            graph.add_node(GraphNode(id=entity_id, kind=ENTITY, label=cleaned))
+            needle = cleaned.lower()
+            for claim in graph.claims():
+                if needle in claim.label.lower():
+                    graph.add_edge(claim.id, MENTIONS, entity_id)
 
     def _origin(
         self,
@@ -315,6 +525,9 @@ class ProvenanceEngine:
         if record is not None:
             stored_name = record.filename or filename
             stored_type = record.content_type or content_type
+            recorded_at = getattr(record, "updated_at", "") or getattr(record, "created_at", "")
+        else:
+            recorded_at = ""
         return Provenance(
             document_id=document_id,
             version=version,
@@ -326,6 +539,7 @@ class ProvenanceEngine:
             page=page,
             start_char=start_char,
             end_char=end_char,
+            recorded_at=recorded_at,
         )
 
 
