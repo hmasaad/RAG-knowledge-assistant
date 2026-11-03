@@ -27,8 +27,11 @@ document.getElementById("upload-form").addEventListener("submit", uploadDocument
 document.getElementById("ask-form").addEventListener("submit", askQuestion);
 document.getElementById("research-form").addEventListener("submit", runResearch);
 document.getElementById("refresh-engineering").addEventListener("click", refreshEngineering);
+document.getElementById("dashboard-form").addEventListener("submit", runDashboard);
+document.getElementById("dashboard-open-trace").addEventListener("click", openDashboardTrace);
 
 function showTab(name) {
+  document.body.classList.toggle("is-trace", name === "trace");
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.tab === name);
   });
@@ -381,4 +384,167 @@ async function refreshEngineering() {
       item(`${row.run_id} · ${row.outcome} · ${row.failure_class || "ok"} · ${row.recovery}`)
     );
   });
+}
+
+let dashboardReport = null;
+
+const STOP_LABEL = {
+  sufficient: "Evidence is sufficient.",
+  search: "Search budget stopped the loop.",
+  token: "Token budget stopped the loop.",
+  time: "Time budget stopped the loop.",
+  unresolved: "Open gaps remain after the questions the loop could try.",
+  failed: "A research step failed.",
+};
+
+async function runDashboard(event) {
+  event.preventDefault();
+  const status = document.getElementById("dashboard-status");
+  status.textContent = "Running the research loop…";
+  try {
+    dashboardReport = await request("/api/trace/loop", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        question: document.getElementById("dashboard-question").value.trim(),
+        max_searches: Number(document.getElementById("dashboard-searches").value),
+        max_tokens: Number(document.getElementById("dashboard-tokens").value),
+        max_seconds: Number(document.getElementById("dashboard-seconds").value),
+      }),
+    });
+    renderDashboard(dashboardReport);
+    status.textContent = STOP_LABEL[dashboardReport.stop_reason] || dashboardReport.stop_reason;
+  } catch (error) {
+    status.textContent = error.message;
+  }
+}
+
+function renderDashboard(report) {
+  document.getElementById("dashboard-body").hidden = false;
+  const metrics = document.getElementById("dashboard-metrics");
+  metrics.replaceChildren();
+  const cards = [
+    ["Confidence", report.metrics.confidence],
+    ["Quality", report.metrics.quality],
+    ["Completeness", report.metrics.completeness],
+    ["Factual support", report.metrics.factual_support],
+    ["Citation validity", report.metrics.citation_validity],
+    ["Source diversity", report.metrics.source_diversity],
+    ["Freshness", report.metrics.freshness],
+    ["Unresolved contradictions", report.metrics.unresolved_contradictions],
+  ];
+  for (const [label, value] of cards) metrics.append(metricCard(label, value));
+  metrics.append(metricCard("Searches", `${report.searches_used}/${report.search_budget}`));
+  metrics.append(metricCard("Tokens", `${report.tokens_used}/${report.token_budget}`));
+  metrics.append(metricCard("Time", `${report.elapsed_seconds}s/${report.time_budget}s`));
+  const trace = document.getElementById("dashboard-trace");
+  trace.replaceChildren();
+  for (const step of report.steps) {
+    const row = document.createElement("li");
+    const strategy = step.strategy ? ` · ${step.strategy}` : "";
+    row.textContent = `${step.action} · ${step.status}${strategy} · ${step.detail}`;
+    trace.append(row);
+  }
+  const conflicts = document.getElementById("dashboard-conflicts");
+  conflicts.replaceChildren();
+  if (!report.contradictions.length) conflicts.append(item("No contradictions."));
+  for (const conflict of report.contradictions) {
+    conflicts.append(item(`${labelConflict(conflict.status)}: ${conflict.left} vs ${conflict.right}. ${conflict.reason}`));
+  }
+  drawDashboardGraph(report.scene);
+}
+
+function metricCard(label, value) {
+  const card = document.createElement("article");
+  card.className = "metric";
+  const number = document.createElement("strong");
+  number.textContent = typeof value === "number" ? value.toFixed(2) : String(value);
+  const caption = document.createElement("span");
+  caption.textContent = label;
+  card.append(number, caption);
+  return card;
+}
+
+function labelConflict(status) {
+  if (status === "pending") return "Unresolved";
+  if (status === "superseded") return "Superseded";
+  if (status === "authority") return "Authority";
+  if (status === "approved") return "Approved";
+  return status || "Conflict";
+}
+
+function openDashboardTrace() {
+  if (!dashboardReport || !dashboardReport.scene || typeof window.showTraceScene !== "function") return;
+  window.showTraceScene(dashboardReport.scene, dashboardReport.question);
+}
+
+function drawDashboardGraph(scene) {
+  const svg = document.getElementById("dashboard-graph");
+  svg.replaceChildren();
+  if (!scene || !scene.claims) return;
+  const pending = new Set();
+  for (const conflict of scene.conflicts || []) {
+    if (conflict.status === "pending") {
+      pending.add(conflict.left_id);
+      pending.add(conflict.right_id);
+    }
+  }
+  const ranked = [];
+  for (const claim of scene.claims) {
+    if (claim.band === "panel") continue;
+    if (pending.has(claim.id)) ranked.push(claim);
+  }
+  for (const claim of scene.claims) {
+    if (claim.band === "panel" || pending.has(claim.id) || !claim.marker) continue;
+    ranked.push(claim);
+  }
+  const picked = ranked.slice(0, 9);
+  const columns = { news: [], social: [], aggregator: [] };
+  for (const claim of picked) {
+    const role = (claim.agent_id || "").split(":").pop();
+    (columns[role] || columns.social).push(claim);
+  }
+  const xs = { news: 140, social: 400, aggregator: 660 };
+  const positions = new Map();
+  for (const [role, claims] of Object.entries(columns)) {
+    claims.forEach((claim, index) => {
+      const y = 36 + index * 28;
+      positions.set(claim.id, { x: xs[role], y });
+    });
+  }
+  const ns = "http://www.w3.org/2000/svg";
+  const edge = (x1, y1, x2, y2, color) => {
+    const line = document.createElementNS(ns, "line");
+    line.setAttribute("x1", x1);
+    line.setAttribute("y1", y1);
+    line.setAttribute("x2", x2);
+    line.setAttribute("y2", y2);
+    line.setAttribute("stroke", color);
+    line.setAttribute("stroke-width", "1.4");
+    svg.append(line);
+  };
+  for (const conflict of scene.conflicts || []) {
+    const left = positions.get(conflict.left_id);
+    const right = positions.get(conflict.right_id);
+    if (left && right) edge(left.x, left.y, right.x, right.y, "#e15b64");
+  }
+  for (const claim of picked) {
+    const at = positions.get(claim.id);
+    if (!at) continue;
+    const box = document.createElementNS(ns, "rect");
+    box.setAttribute("x", at.x - 70);
+    box.setAttribute("y", at.y - 12);
+    box.setAttribute("width", "140");
+    box.setAttribute("height", "24");
+    box.setAttribute("rx", "7");
+    box.setAttribute("fill", pending.has(claim.id) ? "#f0a0a6" : "#f0b429");
+    const text = document.createElementNS(ns, "text");
+    text.setAttribute("x", at.x);
+    text.setAttribute("y", at.y + 4);
+    text.setAttribute("text-anchor", "middle");
+    text.setAttribute("fill", "#1c1404");
+    text.setAttribute("font-size", "11");
+    text.textContent = claim.short || claim.text.slice(0, 18);
+    svg.append(box, text);
+  }
 }

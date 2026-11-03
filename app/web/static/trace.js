@@ -21,7 +21,7 @@ let showContradictions = true;
 let showEntities = false;
 let busy = false;
 
-document.getElementById("ask-form").addEventListener("submit", ask);
+document.getElementById("trace-ask-form").addEventListener("submit", ask);
 document.getElementById("clear-chat").addEventListener("click", clearChat);
 document.getElementById("clear-selection").addEventListener("click", clearSelection);
 document.getElementById("close-inspector").addEventListener("click", () => {
@@ -293,7 +293,12 @@ function nodeClass(id, item, upstream, dim) {
   if (id === selectedClaim || id === selectedAgent || id === selectedChunk) classes.push("is-selected");
   if (upstream.has(id)) classes.push("is-upstream");
   if (dim && item.kind !== "agent") classes.push("is-dim");
+  if (isLoser(id) && id !== selectedClaim) classes.push("is-loser");
   return classes.join(" ");
+}
+
+function isLoser(id) {
+  return (scene.conflicts || []).some((item) => item.loser_id === id && item.status !== "pending");
 }
 
 function agentLabel(id) {
@@ -337,6 +342,8 @@ function renderInspector() {
     decision.textContent = `Decision: ${latest.decision} · ${latest.recorded_at} · ${latest.detail}`;
     inspectorBody.append(decision);
   }
+  renderResearchPlan();
+  renderConflictQueue();
   if (selectedChunk) {
     renderChunk(scene.chunks.find((item) => item.id === selectedChunk));
     return;
@@ -452,6 +459,9 @@ function provenanceBlock(claim) {
     note.textContent = `Contradicts: ${names.join(", ")}`;
     wrap.append(note);
   }
+  for (const conflict of conflictsFor(claim.id)) {
+    wrap.append(conflictNote(conflict, claim.id));
+  }
   if (claim.entities.length) {
     const names = document.createElement("p");
     names.className = "meta";
@@ -459,6 +469,122 @@ function provenanceBlock(claim) {
     wrap.append(names);
   }
   return wrap;
+}
+
+function conflictsFor(claimId) {
+  return (scene.conflicts || []).filter((item) => item.left_id === claimId || item.right_id === claimId);
+}
+
+function renderResearchPlan() {
+  const plan = scene.plan;
+  if (!plan) return;
+  const box = document.createElement("article");
+  box.className = "claim-card plan";
+  const title = document.createElement("p");
+  title.textContent = plan.items && plan.items.length ? "Research plan" : "Evidence is sufficient";
+  box.append(title);
+  if (plan.summary) {
+    const summary = document.createElement("p");
+    summary.className = "origin";
+    summary.textContent = plan.summary;
+    box.append(summary);
+  }
+  for (const item of plan.items || []) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "follow-up";
+    button.textContent = `${item.priority}. ${item.question}`;
+    button.addEventListener("click", () => askFollowUp(item.question));
+    const meta = document.createElement("p");
+    meta.className = "meta";
+    meta.textContent = `${item.strategy} · value ${Number(item.value).toFixed(2)} · ${item.missing}`;
+    box.append(button, meta);
+  }
+  inspectorBody.append(box);
+}
+
+function askFollowUp(question) {
+  if (busy) return;
+  askInput.value = question;
+  ask({ preventDefault() {} });
+}
+
+function renderConflictQueue() {
+  const pending = (scene.conflicts || []).filter((item) => item.status === "pending");
+  if (!pending.length) return;
+  const box = document.createElement("article");
+  box.className = "claim-card";
+  const title = document.createElement("p");
+  title.textContent = pending.length === 1 ? "1 conflict needs approval" : `${pending.length} conflicts need approval`;
+  box.append(title);
+  for (const conflict of pending) box.append(conflictNote(conflict));
+  inspectorBody.append(box);
+}
+
+function conflictNote(conflict, currentId) {
+  const wrap = document.createElement("div");
+  const note = document.createElement("p");
+  note.className = conflict.status === "pending" ? "contra" : "origin";
+  const left = scene.claims.find((item) => item.id === conflict.left_id);
+  const right = scene.claims.find((item) => item.id === conflict.right_id);
+  const pair = `${left ? left.short : "Claim"} vs ${right ? right.short : "Claim"}`;
+  note.textContent = `${labelStatus(conflict.status)}: ${pair}. ${conflict.reason}`;
+  wrap.append(note);
+  if (conflict.status === "pending" || conflict.status === "approved") {
+    const actions = document.createElement("div");
+    actions.className = "approval";
+    actions.append(approveButton(conflict, conflict.left_id, left ? left.short : "Left", currentId));
+    actions.append(approveButton(conflict, conflict.right_id, right ? right.short : "Right", currentId));
+    wrap.append(actions);
+  }
+  return wrap;
+}
+
+function labelStatus(status) {
+  if (status === "superseded") return "Superseded";
+  if (status === "authority") return "Authority";
+  if (status === "approved") return "Approved";
+  return "Unresolved";
+}
+
+function approveButton(conflict, winnerId, name, currentId) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = conflict.winner_id === winnerId ? `Approved ${name}` : `Approve ${name}`;
+  button.disabled = conflict.winner_id === winnerId;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    approveConflict(conflict, winnerId, currentId);
+  });
+  return button;
+}
+
+async function approveConflict(conflict, winnerId, currentId) {
+  if (busy) return;
+  busy = true;
+  try {
+    scene = await api("/api/trace/conflicts/approve", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        asset: scene.asset,
+        conflict_id: conflict.id,
+        winner_id: winnerId,
+      }),
+    });
+    if (currentId) {
+      selectedClaim = currentId;
+      const claim = scene.claims.find((item) => item.id === currentId);
+      if (claim) selectedAgent = claim.agent_id;
+      expanded = true;
+    }
+    render();
+  } catch (error) {
+    messages.push({ role: "assistant", text: error.message, markers: [], asset: scene.asset });
+    renderMessages();
+  } finally {
+    busy = false;
+  }
 }
 
 function lineageLabel(step) {
@@ -575,3 +701,19 @@ async function api(url, options = {}) {
 load("NVDA").catch((error) => {
   messagesEl.textContent = error.message;
 });
+
+window.showTraceScene = function showTraceScene(next, question) {
+  if (!next) return;
+  scene = next;
+  selectedAgent = scene.selected_agent || "";
+  selectedClaim = scene.selected_claim || "";
+  selectedChunk = "";
+  expanded = false;
+  query = "";
+  messages = [];
+  if (question) messages.push({ role: "user", text: question, markers: [], asset: scene.asset });
+  messages.push({ role: "assistant", text: scene.answer || "", markers: scene.markers || [], asset: scene.asset });
+  seeded = true;
+  render();
+  document.querySelector('.tab[data-tab="trace"]')?.click();
+};

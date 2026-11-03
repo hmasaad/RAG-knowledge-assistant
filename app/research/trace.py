@@ -2,7 +2,7 @@
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from app.generation.grounding import AnswerResult
@@ -24,6 +24,8 @@ from app.research.graph import (
     Provenance,
     ProvenanceEngine,
 )
+from app.research.adaptive import plan_research
+from app.research.resolution import resolve_conflicts
 from app.research.verification import Contradiction
 
 AGENT = "agent"
@@ -97,6 +99,7 @@ class _Claim:
     upstream: tuple[str, ...] = ()
     marker: int | None = None
     band: str = "above"
+    version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -223,6 +226,15 @@ def _nvda() -> _Asset:
                 band="below",
             ),
             _Claim(
+                "n0",
+                "news",
+                "Earlier coverage treated NVIDIA as a speculative trade with limited staying power.",
+                "Earlier skepticism",
+                news,
+                band="below",
+                version=1,
+            ),
+            _Claim(
                 "s1",
                 "social",
                 "Traders describe NVIDIA as a core AI holding ahead of the earnings report.",
@@ -330,7 +342,7 @@ def _nvda() -> _Asset:
                 band="panel",
             ),
         ),
-        contradictions=(("s6", "s4"),),
+        contradictions=(("s6", "s4"), ("n1", "n0"), ("n1", "s2")),
         selected_claim="a3",
     )
 
@@ -604,8 +616,42 @@ def build_asset_graph(asset: str) -> EvidenceGraph:
     for claim in spec.claims:
         graph.add_edge(f"claim:{claim.id}", MEMBER_OF, f"agent:{asset}:{claim.agent}")
     _prior_versions(graph, spec)
+    for claim in spec.claims:
+        if claim.version is not None:
+            _pin_claim_version(graph, claim.id, claim.version)
     engine.attach_entities(graph, spec.entities)
     return graph
+
+
+def _pin_claim_version(graph: EvidenceGraph, claim_id: str, version: int) -> None:
+    """Place one claim on an older document version than the file's current edition."""
+    node = graph.nodes[f"claim:{claim_id}"]
+    origin = node.provenance
+    pinned = replace(
+        origin,
+        version=version,
+        checksum=_checksum(origin.filename, version),
+        recorded_at="2026-10-01T00:00:00+00:00",
+    )
+    graph.nodes[node.id] = GraphNode(id=node.id, kind=node.kind, label=node.label, provenance=pinned)
+    passage = graph.nodes.get(f"passage:{origin.chunk_id}")
+    if passage is not None:
+        graph.nodes[passage.id] = GraphNode(
+            id=passage.id,
+            kind=passage.kind,
+            label=passage.label,
+            provenance=pinned,
+        )
+    graph.citations = [
+        replace(item, version=version, recorded_at=pinned.recorded_at) if item.claim_id == node.id else item
+        for item in graph.citations
+    ]
+    graph.audit = [
+        replace(item, detail=item.detail.replace(f"v{origin.version}", f"v{version}"), recorded_at=pinned.recorded_at)
+        if item.subject_id == node.id and item.decision == "supported"
+        else item
+        for item in graph.audit
+    ]
 
 
 def _prior_versions(graph: EvidenceGraph, spec: _Asset) -> None:
@@ -678,7 +724,7 @@ def trace_scene(asset: str) -> dict | None:
                 "audit": _audit_for(graph, node),
             }
         )
-    return {
+    scene = {
         "asset": key,
         "assets": [
             {"id": item.asset, "name": item.name, "color": item.color} for item in _SPECS.values()
@@ -712,6 +758,9 @@ def trace_scene(asset: str) -> dict | None:
         "selected_agent": f"agent:{key}:aggregator",
         "selected_claim": f"claim:{spec.selected_claim}",
     }
+    scene["conflicts"] = resolve_conflicts(scene, key)
+    scene["plan"] = plan_research(scene)
+    return scene
 
 
 LIBRARY = "DOCS"
@@ -929,6 +978,8 @@ def library_scene(result: AnswerResult, metadata: MetadataStore | None = None) -
         "selected_claim": "claim:lib-answer",
     }
     _note_decisions(scene, scene["markers"], "cited")
+    scene["conflicts"] = resolve_conflicts(scene, LIBRARY)
+    scene["plan"] = plan_research(scene)
     return scene
 
 
@@ -1011,8 +1062,10 @@ def answer_from_trace(question: str, asset: str | None = None) -> dict | None:
     scene = trace_scene(chosen)
     if scene is None:
         return None
+    scene["question"] = question.strip()
     if _is_asset_overview(question, _SPECS[chosen]):
         _note_decisions(scene, scene["markers"], "cited")
+        scene["plan"] = plan_research(scene)
         return {
             "asset": chosen,
             "answer": scene["answer"],
@@ -1022,6 +1075,7 @@ def answer_from_trace(question: str, asset: str | None = None) -> dict | None:
     picked = _match_claims(question, scene["claims"], _SPECS[chosen])
     if not picked:
         _note_decisions(scene, [], "refused")
+        scene["plan"] = plan_research(scene)
         return {
             "asset": chosen,
             "answer": "I don't have enough evidence to answer.",
@@ -1032,6 +1086,7 @@ def answer_from_trace(question: str, asset: str | None = None) -> dict | None:
     text = " ".join(f"{claim['text']} [[{index}]]" for index, claim in enumerate(picked, start=1))
     focused = _focus_scene(scene, text, markers)
     _note_decisions(focused, markers, "cited")
+    focused["plan"] = plan_research(focused)
     return {"asset": chosen, "answer": text, "markers": markers, "scene": focused}
 
 
@@ -1081,6 +1136,11 @@ def _focus_scene(scene: dict, answer: str, markers: list[dict]) -> dict:
         ],
         "selected_agent": aggregator,
         "selected_claim": selected,
+        "conflicts": [
+            item
+            for item in scene.get("conflicts", [])
+            if item["left_id"] in claim_ids and item["right_id"] in claim_ids
+        ],
     }
 
 

@@ -6,7 +6,7 @@
     <title>Source Trace Visualiser</title>
     <link rel="stylesheet" href="/ui/trace.css" />
   </head>
-  <body>
+  <body class="trace-page">
     <div class="trace" id="trace">
       <header class="bar">
         <h1>Source Trace Visualiser</h1>
@@ -43,7 +43,7 @@
           </button>
         </div>
         <div id="messages" class="messages"></div>
-        <form id="ask-form" class="composer">
+        <form id="trace-ask-form" class="composer">
           <input id="ask-input" type="text" placeholder="Ask a question..." autocomplete="off" />
           <button type="submit" aria-label="Send">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-2-6-8-2z"></path></svg>

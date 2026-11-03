@@ -1,4 +1,4 @@
-:root {
+.trace {
   color-scheme: dark;
   --bg: #0b1020;
   --panel: #101726;
@@ -10,30 +10,29 @@
   --blue: #3b82f6;
   --chip: #172033;
   font-family: "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  background: var(--bg);
   color: var(--ink);
-}
-
-button,
-input {
-  font: inherit;
-  color: inherit;
-}
-
-.trace {
-  height: 100vh;
+  height: 100%;
+  min-height: 0;
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr) 360px;
   grid-template-rows: 56px minmax(0, 1fr) 56px;
   background: var(--bg);
+}
+
+body.trace-page {
+  margin: 0;
+  min-height: 100vh;
+  background: #0b1020;
+}
+
+body.trace-page .trace {
+  height: 100vh;
+}
+
+.trace button,
+.trace input {
+  font: inherit;
+  color: inherit;
 }
 
 .trace.is-inspector-closed {
@@ -62,18 +61,18 @@ input {
   justify-content: flex-start;
 }
 
-h1,
-h2,
-p {
+.trace h1,
+.trace h2,
+.trace p {
   margin: 0;
 }
 
-h1 {
+.trace h1 {
   font-size: 1.05rem;
   font-weight: 700;
 }
 
-h2 {
+.trace h2 {
   font-size: 1rem;
   font-weight: 700;
 }
@@ -377,6 +376,45 @@ h2 {
 .audit {
   margin: 0.45rem 0 0;
   padding-left: 1rem;
+}
+
+.plan .follow-up {
+  display: block;
+  width: 100%;
+  margin-top: 0.45rem;
+  padding: 0.4rem 0.55rem;
+  text-align: left;
+  background: #182238;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.plan .meta {
+  margin-top: 0.25rem;
+}
+
+.approval {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+.approval button {
+  padding: 0.28rem 0.55rem;
+  border-radius: 8px;
+  background: #182238;
+  color: var(--ink);
+}
+
+.approval button:disabled {
+  opacity: 0.55;
+}
+
+.node.is-loser {
+  opacity: 0.45;
 }
 
 .clear {

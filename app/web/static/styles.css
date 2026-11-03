@@ -119,11 +119,49 @@ button.danger {
   background: var(--card);
 }
 
-.tab-link {
-  display: inline-block;
-  padding: 0.6rem 1rem;
-  color: var(--ink);
-  text-decoration: none;
+body.is-trace {
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+body.is-trace .top,
+body.is-trace .tabs,
+body.is-trace main {
+  width: min(1680px, calc(100% - 1.25rem));
+}
+
+body.is-trace .top {
+  flex: 0 0 auto;
+  padding: 0.7rem 0 0.35rem;
+}
+
+body.is-trace .tabs {
+  flex: 0 0 auto;
+  padding-bottom: 0.45rem;
+}
+
+body.is-trace main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+body.is-trace .panel-trace.is-active {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  padding-bottom: 0;
+}
+
+body.is-trace .panel-trace .trace {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  border-radius: 12px;
+  overflow: hidden;
 }
 
 .panel {
@@ -195,6 +233,64 @@ button.danger {
   display: grid;
   grid-template-columns: 1.3fr 0.9fr;
   gap: 1rem;
+}
+
+.budget-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.metric {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.8rem 0.9rem;
+}
+
+.metric strong {
+  display: block;
+  font-size: 1.35rem;
+}
+
+.metric span {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.trace-list {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.trace-list li {
+  margin: 0.45rem 0;
+}
+
+.dashboard-stage {
+  background: #0b1020;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.dashboard-stage svg {
+  display: block;
+  width: 100%;
+  height: 280px;
+}
+
+@media (max-width: 800px) {
+  .metric-grid,
+  .budget-fields {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 .meta {
