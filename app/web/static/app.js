@@ -394,6 +394,7 @@ const STOP_LABEL = {
   token: "Token budget stopped the loop.",
   time: "Time budget stopped the loop.",
   unresolved: "Open gaps remain after the questions the loop could try.",
+  unchanged: "The search added no new evidence.",
   failed: "A research step failed.",
 };
 

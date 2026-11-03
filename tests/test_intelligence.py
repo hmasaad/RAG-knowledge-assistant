@@ -159,6 +159,84 @@ def test_dashboard_api_reports_progress_contradictions_and_quality(client: TestC
     assert report["metrics"]["sufficient"] is False
     assert report["scene"]["asset"] == "NVDA"
     assert pending and "Bridgewater" in f"{pending[0]['left']} {pending[0]['right']}"
-    assert follow["stop_reason"] == "unresolved"
+    assert follow["stop_reason"] == "unchanged"
     assert follow["searches_used"] == 2
-    assert any(step["action"] == "investigate" for step in follow["steps"])
+    assert follow["scene"]["asset"] == "NVDA"
+    assert follow["steps"][-1]["detail"] == "The search added no new evidence."
+    assert any(
+        step["action"] == "investigate" and "outside" in step["detail"] for step in follow["steps"]
+    )
+
+
+def test_loop_stops_when_a_search_adds_nothing() -> None:
+    scene = trace_scene("NVDA")
+
+    def search(question: str, asset: str) -> dict:
+        return _grounded(scene)
+
+    report = run_research_loop(
+        "What are people saying about NVIDIA?",
+        search,
+        max_searches=4,
+        max_tokens=5000,
+        max_seconds=5,
+    )
+
+    assert report["stop_reason"] == "unchanged"
+    assert report["searches_used"] == 2
+    assert report["scene"]["asset"] == "NVDA"
+    assert report["steps"][-1]["detail"] == "The search added no new evidence."
+    assert any(row["status"] == "pending" for row in report["contradictions"])
+
+
+def test_corroborate_searches_outside_the_current_graph() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def search(question: str, asset: str) -> dict:
+        calls.append(("graph", question))
+        return _grounded(trace_scene("NVDA"))
+
+    def outside(question: str, asset: str) -> dict:
+        calls.append(("library", question))
+        scene = {
+            "asset": "DOCS",
+            "question": question,
+            "answer": "A filing shows Bridgewater cut the NVIDIA position.",
+            "markers": [{"n": 1, "claim_id": "claim:ext"}],
+            "claims": [
+                {
+                    "id": "claim:ext",
+                    "text": "A filing shows Bridgewater cut the NVIDIA position.",
+                    "short": "Filing",
+                    "agent_id": "agent:DOCS:news",
+                    "band": "above",
+                    "upstream": [],
+                    "provenance": {
+                        "filename": "filing.md",
+                        "checksum": "abc",
+                        "version": 1,
+                        "start_char": 0,
+                        "end_char": 48,
+                    },
+                }
+            ],
+            "conflicts": [],
+            "plan": {"summary": "Evidence is sufficient. No follow-up research.", "next_id": "", "items": []},
+        }
+        return {"asset": "DOCS", "answer": scene["answer"], "markers": scene["markers"], "scene": scene}
+
+    report = run_research_loop(
+        "What are people saying about NVIDIA?",
+        search,
+        max_searches=4,
+        max_tokens=5000,
+        max_seconds=5,
+        outside_search=outside,
+    )
+
+    assert calls[0][0] == "graph"
+    assert calls[1] == ("library", "Which claim about NVIDIA holds: Retail bullish or Bridgewater cuts?")
+    assert report["stop_reason"] == "sufficient"
+    assert report["asset"] == "DOCS"
+    assert report["searches_used"] == 2
+    assert any(step["detail"] == "Searching documents outside the current graph." for step in report["steps"])

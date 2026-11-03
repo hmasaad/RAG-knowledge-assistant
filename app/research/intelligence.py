@@ -12,6 +12,8 @@ from collections.abc import Callable
 
 REFUSAL = "I don't have enough evidence to answer."
 _ROLES = ("news", "social", "aggregator")
+_OUTSIDE = frozenset({"corroborate", "broaden"})
+_UNCHANGED = "The search added no new evidence."
 
 
 def run_research_loop(
@@ -23,6 +25,7 @@ def run_research_loop(
     max_tokens: int = 2500,
     max_seconds: float = 15.0,
     clock: Callable[[], float] | None = None,
+    outside_search: Callable[[str, str], dict] | None = None,
 ) -> dict:
     """Search, evaluate, and investigate again inside the three budgets."""
     now = clock or time.monotonic
@@ -39,6 +42,7 @@ def run_research_loop(
     answer = ""
     metrics = _empty_metrics()
     stop_reason = ""
+    seek_outside = False
 
     def elapsed() -> float:
         return round(now() - started, 3)
@@ -73,8 +77,9 @@ def run_research_loop(
             break
 
         attempts = tried.get(current, 0)
+        finder = outside_search if seek_outside and outside_search is not None else search
         try:
-            result = search(current, current_asset)
+            result = finder(current, current_asset)
         except Exception as exc:
             searches_used += 1
             tried[current] = attempts + 1
@@ -100,13 +105,22 @@ def run_research_loop(
 
         searches_used += 1
         tried[current] = attempts + 1
-        answer = str(result.get("answer") or "")
-        scene = result.get("scene") or {}
-        current_asset = str(result.get("asset") or current_asset)
-        tokens_used += _tokens(current) + _tokens(answer)
-        metrics = score_scene(scene)
-        plan_items = (scene.get("plan") or {}).get("items") or []
+        found_answer = str(result.get("answer") or "")
+        found_scene = result.get("scene") or None
+        found_metrics = score_scene(found_scene or {})
+        tokens_used += _tokens(current) + _tokens(found_answer)
+        plan_items = ((found_scene or {}).get("plan") or {}).get("items") or []
         strategy = plan_items[0]["strategy"] if plan_items else ""
+        if scene is not None and not _gained(scene, metrics, found_scene, found_metrics):
+            record("search", "ok", "No new claim, settled conflict, or higher confidence.", strategy=strategy)
+            stop_reason = "unchanged"
+            record("stop", "stopped", _UNCHANGED)
+            break
+        answer = found_answer
+        scene = found_scene or {}
+        current_asset = str(result.get("asset") or current_asset)
+        metrics = found_metrics
+        seek_outside = False
         record("search", "ok", answer[:240], strategy=strategy)
 
         if tokens_used >= max_tokens:
@@ -131,10 +145,13 @@ def run_research_loop(
             record("stop", "stopped", "Search budget exhausted before the next investigation.")
             break
         current = nxt
+        seek_outside = strategy in _OUTSIDE and outside_search is not None
         record(
             "investigate",
             "ok",
-            "Investigating the highest-value follow-up.",
+            "Searching documents outside the current graph."
+            if seek_outside
+            else "Investigating the highest-value follow-up.",
             query=current,
             strategy=strategy,
         )
@@ -220,6 +237,50 @@ def contradiction_report(scene: dict) -> list[dict]:
             }
         )
     return rows
+
+
+def _gained(previous: dict, previous_metrics: dict, scene: dict | None, metrics: dict) -> bool:
+    """True when this search added a claim, settled a conflict, or raised confidence."""
+    if not scene:
+        return False
+    if _evidence_keys(scene) - _evidence_keys(previous):
+        return True
+    if _resolved_pending(previous, scene):
+        return True
+    return metrics["confidence"] > previous_metrics["confidence"]
+
+
+def _evidence_keys(scene: dict) -> set[tuple]:
+    keys = set()
+    for claim in scene.get("claims") or []:
+        provenance = claim.get("provenance") or {}
+        filename = provenance.get("filename") or ""
+        text = claim.get("text") or ""
+        if filename:
+            keys.add(
+                (
+                    "source",
+                    filename,
+                    provenance.get("checksum") or "",
+                    provenance.get("start_char"),
+                    provenance.get("end_char"),
+                    text,
+                )
+            )
+        elif text:
+            keys.add(("text", text))
+    return keys
+
+
+def _resolved_pending(previous: dict, scene: dict) -> bool:
+    current = {item.get("id"): item for item in scene.get("conflicts") or []}
+    for conflict in previous.get("conflicts") or []:
+        if conflict.get("status") != "pending":
+            continue
+        later = current.get(conflict.get("id"))
+        if later is not None and later.get("status") != "pending":
+            return True
+    return False
 
 
 def _next_question(scene: dict | None, tried: dict[str, int]) -> str | None:

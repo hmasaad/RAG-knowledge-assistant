@@ -304,6 +304,8 @@ def research_loop(
     user_id: str = Depends(get_user_id),
 ) -> dict:
     def search(question: str, asset: str) -> dict:
+        if asset not in {"NVDA", "TSLA", "GOLD"}:
+            return {"asset": asset, "answer": "", "markers": [], "scene": None}
         if named_demo_asset(question) is None:
             scene = library_scene(services.generation.answer(question, 4, user_id=user_id), services.metadata)
             if scene is not None:
@@ -318,6 +320,17 @@ def research_loop(
             raise LookupError(f"Unknown asset {asset.strip().upper()}.")
         return result
 
+    def outside_search(question: str, asset: str) -> dict:
+        scene = library_scene(services.generation.answer(question, 4, user_id=user_id), services.metadata)
+        if scene is None:
+            return {"asset": asset, "answer": "", "markers": [], "scene": None}
+        return {
+            "asset": scene["asset"],
+            "answer": scene["answer"],
+            "markers": scene["markers"],
+            "scene": scene,
+        }
+
     return run_research_loop(
         body.question,
         search,
@@ -325,4 +338,5 @@ def research_loop(
         max_searches=body.max_searches,
         max_tokens=body.max_tokens,
         max_seconds=body.max_seconds,
+        outside_search=outside_search,
     )
