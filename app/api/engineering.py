@@ -1,10 +1,12 @@
 """AI Engineering Task Manager API."""
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.dependencies import get_services, get_user_id
 from app.engineering.contracts import EvaluationReport
+from app.engineering.delivery import deliver
+from app.engineering.repository import inspect_repository
 from app.ingestion.errors import KnowledgeError
 from app.wiring import Services
 
@@ -282,6 +284,132 @@ def rollback_planner(
 @router.get("/engineering/audit", response_model=list[AuditEventResponse])
 def read_audit(services: Services = Depends(get_services)) -> list[AuditEventResponse]:
     return [AuditEventResponse(**item.to_payload()) for item in services.engineering.audit()]
+
+
+class DeliveryStageModel(BaseModel):
+    stage: str
+    status: str
+    detail: str
+
+
+class DeliveryFileModel(BaseModel):
+    path: str
+    content: str
+
+
+class DeliveryTestModel(BaseModel):
+    status: str
+    passed: int
+    failed: int
+    summary: str
+    output: str = ""
+
+
+class DeliveryReviewModel(BaseModel):
+    decision: str
+    reason: str
+
+
+class DeliveryPullRequestModel(BaseModel):
+    title: str
+    body: str
+    base: str
+    head: str
+    ready: bool
+    opened: bool
+
+
+class PracticeNoteModel(BaseModel):
+    component: str
+    decision: str
+    reason: str
+
+
+class PracticeModel(BaseModel):
+    summary: str
+    notes: list[PracticeNoteModel]
+
+
+class RepositoryNoteModel(BaseModel):
+    component: str
+    decision: str
+    reason: str
+
+
+class RepositoryFileModel(BaseModel):
+    path: str
+    score: int
+    reason: str
+
+
+class RepositoryDirectoryModel(BaseModel):
+    path: str
+    files: int
+
+
+class RepositoryLayerModel(BaseModel):
+    name: str
+    role: str
+    files: int
+
+
+class RepositoryEdgeModel(BaseModel):
+    source: str
+    target: str
+
+
+class RepositorySymbolModel(BaseModel):
+    classes: int
+    functions: int
+    interfaces: int
+    imports: int
+
+
+class RepositoryReportModel(BaseModel):
+    summary: str
+    languages: list[str]
+    frameworks: list[str]
+    packages: list[str]
+    directories: list[RepositoryDirectoryModel]
+    layers: list[RepositoryLayerModel]
+    relevant: list[RepositoryFileModel]
+    dependencies: list[RepositoryEdgeModel]
+    dependency_count: int
+    symbols: RepositorySymbolModel
+    patterns: list[str]
+    notes: list[RepositoryNoteModel]
+
+
+class DeliveryResponse(BaseModel):
+    summary: str
+    stages: list[DeliveryStageModel]
+    files: list[DeliveryFileModel]
+    tests: DeliveryTestModel
+    review: DeliveryReviewModel
+    pull_request: DeliveryPullRequestModel
+    practice: PracticeModel
+    repository: RepositoryReportModel
+
+
+class DeliveryRequest(BaseModel):
+    requirement: str = Field(min_length=1)
+
+
+class RepositoryRequest(BaseModel):
+    requirement: str = ""
+
+
+@router.post("/engineering/repository", response_model=RepositoryReportModel)
+def read_repository(body: RepositoryRequest) -> dict:
+    return inspect_repository(requirement=body.requirement.strip())
+
+
+@router.post("/engineering/deliver", response_model=DeliveryResponse)
+def deliver_change(body: DeliveryRequest) -> dict:
+    text = body.requirement.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="A requirement is required.")
+    return deliver(text)
 
 
 def _loop_state(state) -> LoopStateResponse:

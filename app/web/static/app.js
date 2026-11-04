@@ -27,6 +27,8 @@ document.getElementById("upload-form").addEventListener("submit", uploadDocument
 document.getElementById("ask-form").addEventListener("submit", askQuestion);
 document.getElementById("research-form").addEventListener("submit", runResearch);
 document.getElementById("refresh-engineering").addEventListener("click", refreshEngineering);
+document.getElementById("repository-form").addEventListener("submit", runRepository);
+document.getElementById("delivery-form").addEventListener("submit", runDelivery);
 document.getElementById("dashboard-form").addEventListener("submit", runDashboard);
 document.getElementById("dashboard-open-trace").addEventListener("click", openDashboardTrace);
 
@@ -385,6 +387,108 @@ async function refreshEngineering() {
     );
   });
 }
+
+async function runRepository(event) {
+  event.preventDefault();
+  const status = document.getElementById("repository-status");
+  const notes = document.getElementById("repository-notes");
+  const files = document.getElementById("repository-files");
+  status.textContent = "Scanning the repository…";
+  notes.replaceChildren();
+  files.textContent = "";
+  try {
+    const body = await request("/api/engineering/repository", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requirement: document.getElementById("repository-requirement").value,
+      }),
+    });
+    status.textContent = body.summary;
+    for (const note of body.notes || []) {
+      const row = document.createElement("li");
+      const label = REPOSITORY_LABEL[note.component] || note.component;
+      row.textContent = `${label} · ${note.decision} · ${note.reason}`;
+      notes.append(row);
+    }
+    files.textContent = (body.relevant || [])
+      .map((item) => `${item.path} · ${item.reason}`)
+      .join("\n");
+  } catch (error) {
+    status.textContent = error.message;
+  }
+}
+
+const REPOSITORY_LABEL = {
+  structure: "Structure",
+  stack: "Stack",
+  symbols: "Symbols",
+  dependencies: "Dependencies",
+  layers: "Layers",
+  files: "Relevant files",
+  patterns: "Patterns",
+  report: "Architecture report",
+};
+
+async function runDelivery(event) {
+  event.preventDefault();
+  const status = document.getElementById("delivery-status");
+  const repo = document.getElementById("delivery-repo");
+  const stages = document.getElementById("delivery-stages");
+  const practice = document.getElementById("delivery-practice");
+  const code = document.getElementById("delivery-code");
+  const pull = document.getElementById("delivery-pr");
+  status.textContent = "Scanning the repository, then running the delivery pipeline…";
+  repo.textContent = "";
+  stages.replaceChildren();
+  practice.replaceChildren();
+  code.textContent = "";
+  pull.textContent = "";
+  try {
+    const body = await request("/api/engineering/deliver", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requirement: document.getElementById("delivery-requirement").value,
+      }),
+    });
+    status.textContent = body.summary;
+    repo.textContent = body.repository ? body.repository.summary : "";
+    for (const stage of body.stages || []) {
+      const row = document.createElement("li");
+      row.textContent = `${stage.stage} · ${stage.status} · ${stage.detail}`;
+      stages.append(row);
+    }
+    for (const note of (body.practice && body.practice.notes) || []) {
+      const row = document.createElement("li");
+      const label = PRACTICE_LABEL[note.component] || note.component;
+      row.textContent = `${label} · ${note.decision} · ${note.reason}`;
+      practice.append(row);
+    }
+    const source = (body.files || []).find((file) => file.path === "change.py");
+    code.textContent = source ? source.content : "";
+    const requestDraft = body.pull_request || {};
+    const ready = requestDraft.ready ? "ready" : "held";
+    pull.textContent = `${requestDraft.title || ""} · ${ready} · ${requestDraft.head || ""}`;
+  } catch (error) {
+    status.textContent = error.message;
+  }
+}
+
+const PRACTICE_LABEL = {
+  repository: "Repository",
+  graph: "Code graph",
+  agents: "Agents",
+  specification: "Specification",
+  planning: "Plan",
+  ast: "AST edit",
+  tdd: "Test-driven development",
+  healing: "Self-healing",
+  review: "Code review",
+  policy: "Policy",
+  debug: "Root cause",
+  governance: "Governance",
+};
 
 let dashboardReport = null;
 

@@ -128,6 +128,35 @@
           <div id="engineering-versions" class="list"></div>
           <ul id="engineering-runs" class="list"></ul>
         </div>
+        <form id="repository-form" class="card">
+          <h2>Repository intelligence</h2>
+          <p class="hint">Scan this repository before writing code. The report covers structure, languages, symbols, dependencies, layers, matching files, and existing patterns.</p>
+          <label>
+            Requirement
+            <textarea id="repository-requirement" rows="3">Find the delivery function that prepares a pull request.</textarea>
+          </label>
+          <button type="submit">Scan repository</button>
+          <p id="repository-status" class="status"></p>
+          <ol id="repository-notes" class="trace-list"></ol>
+          <p id="repository-files" class="status"></p>
+        </form>
+        <form id="delivery-form" class="card">
+          <h2>Software delivery</h2>
+          <p class="hint">The repository is scanned first. Then the pipeline understands the requirement, plans the change, writes the code, runs its tests, reviews the result, and prepares a pull request draft.</p>
+          <label>
+            Requirement
+            <textarea id="delivery-requirement" rows="5" required>Add a function that greets a person by name.
+- The greeting includes the name.
+- An empty name is rejected.</textarea>
+          </label>
+          <button type="submit">Run delivery</button>
+          <p id="delivery-status" class="status"></p>
+          <p id="delivery-repo" class="hint"></p>
+          <ol id="delivery-stages" class="trace-list"></ol>
+          <ol id="delivery-practice" class="trace-list"></ol>
+          <pre id="delivery-code" class="report"></pre>
+          <p id="delivery-pr" class="status"></p>
+        </form>
       </section>
 
       <section id="panel-trace" class="panel panel-trace" role="tabpanel" hidden>
