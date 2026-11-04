@@ -184,7 +184,50 @@ def test_dashboard_shows_trajectory_evaluation_and_failure_prediction(client: Te
     assert "<h2>Counterfactual</h2>" in page.text
     assert "<h2>Research agents</h2>" in page.text
     assert "<h2>Benchmark</h2>" in page.text
+    assert "<h2>Scientific discovery</h2>" in page.text
+    assert "<h2>Agent society</h2>" in page.text
     assert "<h2>Advanced evaluation</h2>" in page.text
+    society = {note["component"]: note for note in body["discovery"]["society"]["notes"]}
+    assert list(society) == [
+        "mas",
+        "hierarchy",
+        "blackboard",
+        "protocol",
+        "allocation",
+        "planning",
+        "debate",
+        "consensus",
+        "distributed",
+        "observability",
+    ]
+    assert society["consensus"]["decision"] == "dissent"
+    assert "<h2>Acceptance criteria</h2>" in page.text
+    acceptance = {item["criterion"]: item for item in body["acceptance"]["criteria"]}
+    assert list(acceptance) == [
+        "evidence",
+        "hypothesis",
+        "reliability",
+        "coordination",
+        "conflicts",
+        "reproducibility",
+    ]
+    assert body["acceptance"]["met"] is False
+    assert acceptance["evidence"]["result"] == "fail"
+    assert acceptance["conflicts"]["result"] == "fail"
+    agents = [review["agent"] for review in body["discovery"]["reviews"]]
+    assert agents == ["Investigator", "Challenger", "Hypothesis tester", "Conclusion"]
+    assert body["discovery"]["conclusion"]["verdict"] == "disputed"
+    assert [phase["component"] for phase in body["discovery"]["phases"]] == [
+        "orchestration",
+        "hypotheses",
+        "collaboration",
+        "debate",
+        "experiment",
+        "consensus",
+        "reproducibility",
+        "evaluation",
+    ]
+    assert body["discovery"]["phases"][5]["status"] == "dissent"
     components = {note["component"] for note in body["advanced"]["notes"]}
     assert components == {
         "failure",

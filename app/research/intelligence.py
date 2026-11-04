@@ -10,7 +10,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+from app.research.acceptance import measure_acceptance
 from app.research.advanced import analyze_run
+from app.research.discovery import discover
 from app.research.learning import (
     ResearchMemory,
     assign_agent,
@@ -277,6 +279,8 @@ def run_research_loop(
     report["collaboration"] = collaboration_report(steps, stop_reason, stop_detail)
     report["benchmark"] = benchmark_run(memory, report, report["counterfactual"])
     report["advanced"] = analyze_run(report, memory)
+    report["discovery"] = discover(report)
+    report["acceptance"] = measure_acceptance(report, report["discovery"])
     learned_from = memory
     if memory is None:
         learned_from = ResearchMemory()

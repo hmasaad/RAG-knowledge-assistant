@@ -500,6 +500,9 @@ function renderLearning(report) {
   renderStrategyLearning(report.learning || null);
   renderImprovement(report);
   renderAdvanced(report.advanced || null);
+  renderDiscovery(report.discovery || null);
+  renderSociety((report.discovery && report.discovery.society) || null);
+  renderAcceptance(report.acceptance || null);
 }
 
 function renderStrategyLearning(learning) {
@@ -543,6 +546,80 @@ function renderAdvanced(advanced) {
     const row = document.createElement("li");
     const label = ADVANCED_LABEL[note.component] || note.component;
     row.textContent = `${label} · ${note.decision} · ${note.reason}`;
+    list.append(row);
+  }
+}
+
+function renderDiscovery(discovery) {
+  const status = document.getElementById("dashboard-discovery");
+  const hypothesis = document.getElementById("dashboard-hypothesis");
+  const list = document.getElementById("dashboard-discovery-list");
+  const phases = document.getElementById("dashboard-discovery-phases");
+  if (!status || !hypothesis || !list || !phases) return;
+  status.textContent = discovery ? discovery.summary : "";
+  const item = discovery && discovery.hypothesis;
+  hypothesis.textContent = item ? `Hypothesis · ${item.status} · ${item.statement}` : "";
+  list.replaceChildren();
+  for (const review of (discovery && discovery.reviews) || []) {
+    const row = document.createElement("li");
+    row.textContent = `${review.agent} · ${review.stance} · ${review.finding}`;
+    list.append(row);
+  }
+  phases.replaceChildren();
+  for (const phase of (discovery && discovery.phases) || []) {
+    const row = document.createElement("li");
+    row.textContent = `${phase.phase}. ${phase.title} · ${phase.status} · ${phase.summary}`;
+    phases.append(row);
+  }
+}
+
+const SOCIETY_LABEL = {
+  mas: "Multi-agent system",
+  hierarchy: "Hierarchy",
+  blackboard: "Blackboard",
+  protocol: "Messages",
+  allocation: "Task allocation",
+  planning: "Coordination",
+  debate: "Debate",
+  consensus: "Quorum",
+  distributed: "Distributed execution",
+  observability: "Observability",
+};
+
+function renderSociety(society) {
+  const status = document.getElementById("dashboard-society");
+  const list = document.getElementById("dashboard-society-list");
+  if (!status || !list) return;
+  status.textContent = society ? society.summary : "";
+  list.replaceChildren();
+  for (const note of (society && society.notes) || []) {
+    const row = document.createElement("li");
+    const label = SOCIETY_LABEL[note.component] || note.component;
+    row.textContent = `${label} · ${note.decision} · ${note.reason}`;
+    list.append(row);
+  }
+}
+
+const ACCEPTANCE_LABEL = {
+  evidence: "Evidence quality",
+  hypothesis: "Hypothesis quality",
+  reliability: "Agent reliability",
+  coordination: "Coordination efficiency",
+  conflicts: "Conflict resolution",
+  reproducibility: "Reproducibility",
+};
+
+function renderAcceptance(acceptance) {
+  const status = document.getElementById("dashboard-acceptance");
+  const list = document.getElementById("dashboard-acceptance-list");
+  if (!status || !list) return;
+  status.textContent = acceptance ? acceptance.summary : "";
+  list.replaceChildren();
+  for (const item of (acceptance && acceptance.criteria) || []) {
+    const row = document.createElement("li");
+    const label = ACCEPTANCE_LABEL[item.criterion] || item.criterion;
+    const score = Number(item.score || 0).toFixed(2);
+    row.textContent = `${label} · ${item.result} · ${score} · ${item.reason}`;
     list.append(row);
   }
 }

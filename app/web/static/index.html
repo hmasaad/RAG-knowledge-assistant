@@ -202,7 +202,7 @@
       <section id="panel-dashboard" class="panel" role="tabpanel" hidden>
         <form id="dashboard-form" class="card">
           <h2>Research intelligence</h2>
-          <p class="hint">Search, evaluate, and investigate again until the evidence is sufficient or a budget runs out. Finished paths teach the loop which strategies help, how many passages to retrieve, and when to change the next question. Each run also scores the questions it skipped, hands the work to a specialist, and compares its score with earlier runs.</p>
+          <p class="hint">Search, evaluate, and investigate again until the evidence is sufficient or a budget runs out. Finished paths teach the loop which strategies help, how many passages to retrieve, and when to change the next question. Each run also scores the questions it skipped, hands the work to a specialist, and compares its score with earlier runs. A discovery team then investigates the answer, challenges it, tests a hypothesis, and writes a conclusion.</p>
           <label>
             Question
             <textarea id="dashboard-question" rows="3" required>What are people saying about NVIDIA?</textarea>
@@ -270,6 +270,23 @@
               <p id="dashboard-improvement" class="status"></p>
             </article>
           </div>
+          <article class="card">
+            <h2>Scientific discovery</h2>
+            <p id="dashboard-discovery" class="status"></p>
+            <p id="dashboard-hypothesis" class="status"></p>
+            <ol id="dashboard-discovery-list" class="trace-list"></ol>
+            <ol id="dashboard-discovery-phases" class="trace-list"></ol>
+          </article>
+          <article class="card">
+            <h2>Agent society</h2>
+            <p id="dashboard-society" class="status"></p>
+            <ol id="dashboard-society-list" class="trace-list"></ol>
+          </article>
+          <article class="card">
+            <h2>Acceptance criteria</h2>
+            <p id="dashboard-acceptance" class="status"></p>
+            <ol id="dashboard-acceptance-list" class="trace-list"></ol>
+          </article>
           <article class="card">
             <h2>Advanced evaluation</h2>
             <p id="dashboard-advanced" class="status"></p>

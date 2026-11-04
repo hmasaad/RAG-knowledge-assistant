@@ -366,6 +366,71 @@ class AdvancedModel(BaseModel):
     notes: list[AdvancedNoteModel]
 
 
+class DiscoveryReviewModel(BaseModel):
+    agent: str
+    stance: str
+    finding: str
+
+
+class DiscoveryHypothesisModel(BaseModel):
+    statement: str
+    status: str
+
+
+class DiscoveryConclusionModel(BaseModel):
+    verdict: str
+    text: str
+
+
+class DiscoveryRecordModel(BaseModel):
+    label: str
+    detail: str
+
+
+class DiscoveryPhaseModel(BaseModel):
+    phase: int
+    component: str
+    title: str
+    status: str
+    summary: str
+    records: list[DiscoveryRecordModel]
+
+
+class SocietyNoteModel(BaseModel):
+    component: str
+    decision: str
+    reason: str
+
+
+class SocietyModel(BaseModel):
+    summary: str
+    notes: list[SocietyNoteModel]
+
+
+class DiscoveryModel(BaseModel):
+    summary: str
+    hypothesis: DiscoveryHypothesisModel
+    reviews: list[DiscoveryReviewModel]
+    conclusion: DiscoveryConclusionModel
+    phases: list[DiscoveryPhaseModel]
+    society: SocietyModel
+
+
+class AcceptanceCriterionModel(BaseModel):
+    criterion: str
+    result: str
+    score: float
+    reason: str
+
+
+class AcceptanceModel(BaseModel):
+    passed: int
+    total: int
+    met: bool
+    summary: str
+    criteria: list[AcceptanceCriterionModel]
+
+
 class LoopReportModel(BaseModel):
     question: str
     asset: str
@@ -389,6 +454,8 @@ class LoopReportModel(BaseModel):
     collaboration: CollaborationModel
     benchmark: BenchmarkModel
     advanced: AdvancedModel
+    discovery: DiscoveryModel
+    acceptance: AcceptanceModel
 
 
 def _scene_or_404(asset: str) -> dict:
