@@ -274,6 +274,52 @@ body.is-trace .panel-trace .trace {
   margin: 0.45rem 0;
 }
 
+.path {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.path li {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  font-size: 0.85rem;
+}
+
+.path .useful {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.path .waste,
+.path .skipped {
+  color: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+.path .failed {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.path .recovered,
+.path .outside,
+.path .continued {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.learning-grid {
+  display: grid;
+  grid-template-columns: 1.3fr 0.85fr 0.85fr;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
 .dashboard-stage {
   background: #0b1020;
   border-radius: 12px;
@@ -288,7 +334,8 @@ body.is-trace .panel-trace .trace {
 
 @media (max-width: 800px) {
   .metric-grid,
-  .budget-fields {
+  .budget-fields,
+  .learning-grid {
     grid-template-columns: 1fr 1fr;
   }
 }

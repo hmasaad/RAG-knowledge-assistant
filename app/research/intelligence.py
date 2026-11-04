@@ -10,6 +10,23 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+from app.research.advanced import analyze_run
+from app.research.learning import (
+    ResearchMemory,
+    assign_agent,
+    benchmark_run,
+    choose_next_step,
+    choose_retrieval,
+    close_counterfactual,
+    collaboration_report,
+    evaluate_trajectory,
+    learn_strategies,
+    open_counterfactual,
+    predict_failure,
+    stop_counterfactual,
+    summarize_counterfactuals,
+)
+
 REFUSAL = "I don't have enough evidence to answer."
 _ROLES = ("news", "social", "aggregator")
 _OUTSIDE = frozenset({"corroborate", "broaden"})
@@ -26,6 +43,8 @@ def run_research_loop(
     max_seconds: float = 15.0,
     clock: Callable[[], float] | None = None,
     outside_search: Callable[[str, str], dict] | None = None,
+    memory: ResearchMemory | None = None,
+    retrieval: dict | None = None,
 ) -> dict:
     """Search, evaluate, and investigate again inside the three budgets."""
     now = clock or time.monotonic
@@ -43,11 +62,30 @@ def run_research_loop(
     metrics = _empty_metrics()
     stop_reason = ""
     seek_outside = False
+    active_strategy = "initial"
+    retrieval_choice = choose_retrieval(active_strategy, memory)
+    applied_retrieval = retrieval_choice
+    policy_note = {
+        "action": "follow",
+        "strategy": "initial",
+        "reason": "The first search follows the question as asked.",
+    }
+    forks: list[dict] = []
+    open_fork: dict | None = None
 
     def elapsed() -> float:
         return round(now() - started, 3)
 
-    def record(action: str, status: str, detail: str, *, query: str = "", strategy: str = "") -> None:
+    def record(
+        action: str,
+        status: str,
+        detail: str,
+        *,
+        query: str = "",
+        strategy: str = "",
+        top_k: int = 0,
+        agent: str = "",
+    ) -> None:
         steps.append(
             {
                 "action": action,
@@ -59,8 +97,23 @@ def run_research_loop(
                 "tokens_used": tokens_used,
                 "elapsed_seconds": elapsed(),
                 "confidence": metrics["confidence"],
+                "top_k": top_k,
+                "agent": agent,
             }
         )
+
+    def settle_fork(useful: bool) -> None:
+        nonlocal open_fork
+        if open_fork is None:
+            return
+        forks.append(close_counterfactual(open_fork, useful=useful))
+        open_fork = None
+
+    def apply_retrieval() -> None:
+        nonlocal applied_retrieval
+        applied_retrieval = retrieval_choice
+        if retrieval is not None:
+            retrieval["top_k"] = int(retrieval_choice["top_k"])
 
     while True:
         if now() >= deadline:
@@ -78,6 +131,8 @@ def run_research_loop(
 
         attempts = tried.get(current, 0)
         finder = outside_search if seek_outside and outside_search is not None else search
+        running_agent = assign_agent(active_strategy)["name"]
+        apply_retrieval()
         try:
             result = finder(current, current_asset)
         except Exception as exc:
@@ -86,20 +141,41 @@ def run_research_loop(
             message = str(exc).strip() or "Search failed."
             can_retry = attempts < 1 and searches_used < max_searches and now() < deadline
             if can_retry:
-                record("search", "recovered", f"Recovered from a failed search: {message}")
+                record(
+                    "search",
+                    "recovered",
+                    f"Recovered from a failed search: {message}",
+                    top_k=applied_retrieval["top_k"],
+                    agent=running_agent,
+                )
                 continue
-            record("search", "failed", message)
-            nxt = _next_question(scene, tried)
-            if nxt is None:
+            settle_fork(False)
+            record("search", "failed", message, top_k=applied_retrieval["top_k"], agent=running_agent)
+            decision = choose_next_step(scene, tried, memory)
+            if decision["item"] is None:
                 stop_reason = "failed"
                 record("stop", "stopped", "A research step failed and there is no alternate question.")
                 break
-            current = nxt
+            if decision["abandon"]:
+                forks.append(stop_counterfactual(decision, memory))
+                policy_note = decision["policy"]
+                stop_reason = "policy"
+                record("stop", "stopped", decision["policy"]["reason"])
+                break
+            item = decision["item"]
+            current = str(item.get("question") or "")
+            active_strategy = str(item.get("strategy") or "")
+            retrieval_choice = choose_retrieval(active_strategy, memory)
+            policy_note = decision["policy"]
+            open_fork = open_counterfactual(decision, memory)
+            seek_outside = active_strategy in _OUTSIDE and outside_search is not None
             record(
                 "investigate",
                 "skipped",
                 "Skipped the failed step and continued with the next question.",
                 query=current,
+                strategy=active_strategy,
+                agent=assign_agent(active_strategy)["name"],
             )
             continue
 
@@ -112,7 +188,15 @@ def run_research_loop(
         plan_items = ((found_scene or {}).get("plan") or {}).get("items") or []
         strategy = plan_items[0]["strategy"] if plan_items else ""
         if scene is not None and not _gained(scene, metrics, found_scene, found_metrics):
-            record("search", "ok", "No new claim, settled conflict, or higher confidence.", strategy=strategy)
+            settle_fork(False)
+            record(
+                "search",
+                "ok",
+                "No new claim, settled conflict, or higher confidence.",
+                strategy=strategy,
+                top_k=applied_retrieval["top_k"],
+                agent=running_agent,
+            )
             stop_reason = "unchanged"
             record("stop", "stopped", _UNCHANGED)
             break
@@ -121,7 +205,8 @@ def run_research_loop(
         current_asset = str(result.get("asset") or current_asset)
         metrics = found_metrics
         seek_outside = False
-        record("search", "ok", answer[:240], strategy=strategy)
+        settle_fork(True)
+        record("search", "ok", answer[:240], strategy=strategy, top_k=applied_retrieval["top_k"], agent=running_agent)
 
         if tokens_used >= max_tokens:
             stop_reason = "token"
@@ -131,8 +216,8 @@ def run_research_loop(
             stop_reason = "sufficient"
             record("stop", "stopped", "Evidence is sufficient.")
             break
-        nxt = _next_question(scene, tried)
-        if nxt is None:
+        decision = choose_next_step(scene, tried, memory)
+        if decision["item"] is None:
             stop_reason = "unresolved"
             record(
                 "stop",
@@ -140,12 +225,23 @@ def run_research_loop(
                 "Open gaps remain, and another search would repeat a question already tried.",
             )
             break
+        if decision["abandon"]:
+            forks.append(stop_counterfactual(decision, memory))
+            policy_note = decision["policy"]
+            stop_reason = "policy"
+            record("stop", "stopped", decision["policy"]["reason"])
+            break
         if searches_used >= max_searches:
             stop_reason = "search"
             record("stop", "stopped", "Search budget exhausted before the next investigation.")
             break
-        current = nxt
-        seek_outside = strategy in _OUTSIDE and outside_search is not None
+        item = decision["item"]
+        current = str(item.get("question") or "")
+        active_strategy = str(item.get("strategy") or "")
+        retrieval_choice = choose_retrieval(active_strategy, memory)
+        policy_note = decision["policy"]
+        open_fork = open_counterfactual(decision, memory)
+        seek_outside = active_strategy in _OUTSIDE and outside_search is not None
         record(
             "investigate",
             "ok",
@@ -153,10 +249,11 @@ def run_research_loop(
             if seek_outside
             else "Investigating the highest-value follow-up.",
             query=current,
-            strategy=strategy,
+            strategy=active_strategy,
+            agent=assign_agent(active_strategy)["name"],
         )
 
-    return {
+    report = {
         "question": asked,
         "asset": current_asset,
         "answer": answer,
@@ -173,6 +270,22 @@ def run_research_loop(
         "contradictions": contradiction_report(scene or {}),
         "scene": scene,
     }
+    report["evaluation"] = evaluate_trajectory(report)
+    report["prediction"] = predict_failure(report, memory)
+    stop_detail = steps[-1]["detail"] if steps and steps[-1]["action"] == "stop" else ""
+    report["counterfactual"] = summarize_counterfactuals(forks)
+    report["collaboration"] = collaboration_report(steps, stop_reason, stop_detail)
+    report["benchmark"] = benchmark_run(memory, report, report["counterfactual"])
+    report["advanced"] = analyze_run(report, memory)
+    learned_from = memory
+    if memory is None:
+        learned_from = ResearchMemory()
+    learned_from.remember(report)
+    learned = learn_strategies(learned_from)
+    learned["policy"] = policy_note
+    learned["retrieval"] = applied_retrieval
+    report["learning"] = learned
+    return report
 
 
 def score_scene(scene: dict) -> dict:
@@ -281,16 +394,6 @@ def _resolved_pending(previous: dict, scene: dict) -> bool:
         if later is not None and later.get("status") != "pending":
             return True
     return False
-
-
-def _next_question(scene: dict | None, tried: dict[str, int]) -> str | None:
-    if not scene:
-        return None
-    for item in (scene.get("plan") or {}).get("items") or []:
-        question = str(item.get("question") or "").strip()
-        if question and question not in tried:
-            return question
-    return None
 
 
 def _support(scene: dict, claims: dict[str, dict]) -> list[dict]:

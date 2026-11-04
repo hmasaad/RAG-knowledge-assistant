@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.api.dependencies import get_services, get_user_id
 from app.research.intelligence import run_research_loop
+from app.research.learning import research_memory
 from app.research.resolution import approval_log
 from app.research.trace import answer_from_trace, library_scene, named_demo_asset, trace_scene
 from app.wiring import Services
@@ -197,6 +198,8 @@ class LoopStepModel(BaseModel):
     tokens_used: int = 0
     elapsed_seconds: float = 0
     confidence: float = 0
+    top_k: int = 0
+    agent: str = ""
 
 
 class LoopMetricsModel(BaseModel):
@@ -228,6 +231,141 @@ class LoopRequest(BaseModel):
     max_seconds: float = Field(default=15, gt=0, le=60)
 
 
+class TrajectoryDecisionModel(BaseModel):
+    index: int
+    action: str
+    question: str = ""
+    strategy: str = ""
+    verdict: str
+    reason: str
+
+
+class TrajectoryFindingModel(BaseModel):
+    kind: str
+    detail: str
+
+
+class TrajectoryEvaluationModel(BaseModel):
+    score: float
+    outcome: str
+    summary: str
+    gain_rate: float
+    efficiency: float
+    decisions: list[TrajectoryDecisionModel]
+    findings: list[TrajectoryFindingModel]
+
+
+class StrategyStatModel(BaseModel):
+    strategy: str
+    runs: int
+    useful: int
+    useful_rate: float
+
+
+class PolicyDecisionModel(BaseModel):
+    action: str
+    strategy: str = ""
+    reason: str
+
+
+class RetrievalChoiceModel(BaseModel):
+    top_k: int
+    strategy: str = ""
+    reason: str
+    basis: str = "default"
+
+
+class CounterfactualAlternativeModel(BaseModel):
+    strategy: str = ""
+    question: str = ""
+    expected: float = 0
+    basis: str = ""
+
+
+class CounterfactualForkModel(BaseModel):
+    taken_strategy: str = ""
+    taken_question: str = ""
+    useful: bool = False
+    actual: float = 0
+    verdict: str
+    summary: str
+    alternatives: list[CounterfactualAlternativeModel] = []
+
+
+class CounterfactualModel(BaseModel):
+    verdict: str
+    summary: str
+    forks: list[CounterfactualForkModel] = []
+
+
+class ResearchAgentModel(BaseModel):
+    id: str
+    name: str
+    task: str = ""
+    searches: int = 0
+    useful: int = 0
+
+
+class HandoffModel(BaseModel):
+    from_agent: str
+    to_agent: str
+    strategy: str = ""
+    question: str = ""
+
+
+class AggregatorNoteModel(BaseModel):
+    name: str
+    decision: str
+    reason: str
+
+
+class CollaborationModel(BaseModel):
+    agents: list[ResearchAgentModel]
+    handoffs: list[HandoffModel]
+    aggregator: AggregatorNoteModel
+    summary: str
+
+
+class BenchmarkModel(BaseModel):
+    runs: int
+    latest_score: float
+    mean_score: float
+    delta: float
+    success_rate: float
+    trend: str
+    summary: str
+    improvement: str
+
+
+class LearningModel(BaseModel):
+    strategies: list[StrategyStatModel]
+    best: str = ""
+    summary: str
+    policy: PolicyDecisionModel
+    retrieval: RetrievalChoiceModel
+
+
+class FailurePredictionModel(BaseModel):
+    label: str
+    probability: float
+    at_search: int = 0
+    warned_at_search: int | None = None
+    reasons: list[str]
+    basis: str
+    history_runs: int = 0
+
+
+class AdvancedNoteModel(BaseModel):
+    component: str
+    decision: str
+    reason: str
+
+
+class AdvancedModel(BaseModel):
+    summary: str
+    notes: list[AdvancedNoteModel]
+
+
 class LoopReportModel(BaseModel):
     question: str
     asset: str
@@ -244,6 +382,13 @@ class LoopReportModel(BaseModel):
     metrics: LoopMetricsModel
     contradictions: list[LoopConflictModel]
     scene: TraceSceneModel | None = None
+    evaluation: TrajectoryEvaluationModel
+    prediction: FailurePredictionModel
+    learning: LearningModel
+    counterfactual: CounterfactualModel
+    collaboration: CollaborationModel
+    benchmark: BenchmarkModel
+    advanced: AdvancedModel
 
 
 def _scene_or_404(asset: str) -> dict:
@@ -303,11 +448,16 @@ def research_loop(
     services: Services = Depends(get_services),
     user_id: str = Depends(get_user_id),
 ) -> dict:
+    retrieval = {"top_k": 4}
+
     def search(question: str, asset: str) -> dict:
         if asset not in {"NVDA", "TSLA", "GOLD"}:
             return {"asset": asset, "answer": "", "markers": [], "scene": None}
         if named_demo_asset(question) is None:
-            scene = library_scene(services.generation.answer(question, 4, user_id=user_id), services.metadata)
+            scene = library_scene(
+                services.generation.answer(question, int(retrieval["top_k"]), user_id=user_id),
+                services.metadata,
+            )
             if scene is not None:
                 return {
                     "asset": scene["asset"],
@@ -321,7 +471,10 @@ def research_loop(
         return result
 
     def outside_search(question: str, asset: str) -> dict:
-        scene = library_scene(services.generation.answer(question, 4, user_id=user_id), services.metadata)
+        scene = library_scene(
+            services.generation.answer(question, int(retrieval["top_k"]), user_id=user_id),
+            services.metadata,
+        )
         if scene is None:
             return {"asset": asset, "answer": "", "markers": [], "scene": None}
         return {
@@ -339,4 +492,6 @@ def research_loop(
         max_tokens=body.max_tokens,
         max_seconds=body.max_seconds,
         outside_search=outside_search,
+        memory=research_memory,
+        retrieval=retrieval,
     )

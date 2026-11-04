@@ -202,7 +202,7 @@
       <section id="panel-dashboard" class="panel" role="tabpanel" hidden>
         <form id="dashboard-form" class="card">
           <h2>Research intelligence</h2>
-          <p class="hint">Search, evaluate, and investigate again until the evidence is sufficient or a budget runs out.</p>
+          <p class="hint">Search, evaluate, and investigate again until the evidence is sufficient or a budget runs out. Finished paths teach the loop which strategies help, how many passages to retrieve, and when to change the next question. Each run also scores the questions it skipped, hands the work to a specialist, and compares its score with earlier runs.</p>
           <label>
             Question
             <textarea id="dashboard-question" rows="3" required>What are people saying about NVIDIA?</textarea>
@@ -226,6 +226,55 @@
         </form>
         <div id="dashboard-body" hidden>
           <div id="dashboard-metrics" class="metric-grid"></div>
+          <div class="split">
+            <article class="card">
+              <h2>Trajectory evaluation</h2>
+              <p id="dashboard-eval" class="status"></p>
+              <ol id="dashboard-path" class="path"></ol>
+            </article>
+            <article class="card">
+              <h2>Failure prediction</h2>
+              <p id="dashboard-predict" class="status"></p>
+              <ul id="dashboard-predict-reasons" class="list"></ul>
+            </article>
+          </div>
+          <div class="learning-grid">
+            <article class="card">
+              <h2>Strategy learning</h2>
+              <p id="dashboard-strategy" class="status"></p>
+              <ol id="dashboard-strategy-list" class="trace-list"></ol>
+            </article>
+            <article class="card">
+              <h2>Retrieval</h2>
+              <p id="dashboard-retrieval" class="status"></p>
+            </article>
+            <article class="card">
+              <h2>Policy</h2>
+              <p id="dashboard-policy" class="status"></p>
+            </article>
+          </div>
+          <div class="learning-grid">
+            <article class="card">
+              <h2>Counterfactual</h2>
+              <p id="dashboard-counterfactual" class="status"></p>
+              <ol id="dashboard-counterfactual-list" class="trace-list"></ol>
+            </article>
+            <article class="card">
+              <h2>Research agents</h2>
+              <p id="dashboard-agents" class="status"></p>
+              <ol id="dashboard-agent-list" class="trace-list"></ol>
+            </article>
+            <article class="card">
+              <h2>Benchmark</h2>
+              <p id="dashboard-benchmark" class="status"></p>
+              <p id="dashboard-improvement" class="status"></p>
+            </article>
+          </div>
+          <article class="card">
+            <h2>Advanced evaluation</h2>
+            <p id="dashboard-advanced" class="status"></p>
+            <ol id="dashboard-advanced-list" class="trace-list"></ol>
+          </article>
           <div class="split">
             <article class="card">
               <h2>Execution trace</h2>

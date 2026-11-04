@@ -396,6 +396,7 @@ const STOP_LABEL = {
   unresolved: "Open gaps remain after the questions the loop could try.",
   unchanged: "The search added no new evidence.",
   failed: "A research step failed.",
+  policy: "Past runs show this strategy rarely adds evidence.",
 };
 
 async function runDashboard(event) {
@@ -438,12 +439,16 @@ function renderDashboard(report) {
   metrics.append(metricCard("Searches", `${report.searches_used}/${report.search_budget}`));
   metrics.append(metricCard("Tokens", `${report.tokens_used}/${report.token_budget}`));
   metrics.append(metricCard("Time", `${report.elapsed_seconds}s/${report.time_budget}s`));
+  if (report.evaluation) metrics.append(metricCard("Path score", report.evaluation.score));
+  renderLearning(report);
   const trace = document.getElementById("dashboard-trace");
   trace.replaceChildren();
   for (const step of report.steps) {
     const row = document.createElement("li");
     const strategy = step.strategy ? ` · ${step.strategy}` : "";
-    row.textContent = `${step.action} · ${step.status}${strategy} · ${step.detail}`;
+    const agent = step.agent ? ` · ${step.agent}` : "";
+    const passages = step.action === "search" && step.top_k ? ` · top_k ${step.top_k}` : "";
+    row.textContent = `${step.action} · ${step.status}${agent}${strategy}${passages} · ${step.detail}`;
     trace.append(row);
   }
   const conflicts = document.getElementById("dashboard-conflicts");
@@ -453,6 +458,135 @@ function renderDashboard(report) {
     conflicts.append(item(`${labelConflict(conflict.status)}: ${conflict.left} vs ${conflict.right}. ${conflict.reason}`));
   }
   drawDashboardGraph(report.scene);
+}
+
+const PREDICT_LABEL = {
+  likely_fail: "Likely to fail",
+  likely_succeed: "Likely to succeed",
+  uncertain: "Uncertain",
+};
+
+function renderLearning(report) {
+  const evaluation = report.evaluation || null;
+  const prediction = report.prediction || null;
+  const evalStatus = document.getElementById("dashboard-eval");
+  evalStatus.textContent = evaluation
+    ? `${evaluation.outcome} · score ${Number(evaluation.score).toFixed(2)}. ${evaluation.summary}`
+    : "";
+  const path = document.getElementById("dashboard-path");
+  path.replaceChildren();
+  for (const decision of (evaluation && evaluation.decisions) || []) {
+    const row = document.createElement("li");
+    row.className = decision.verdict;
+    row.textContent = `${decision.verdict} · ${decision.reason}`;
+    path.append(row);
+  }
+  const predict = document.getElementById("dashboard-predict");
+  if (!prediction) {
+    predict.textContent = "";
+  } else {
+    const percent = Math.round(prediction.probability * 100);
+    const when = prediction.warned_at_search
+      ? ` Warning at search ${prediction.warned_at_search}.`
+      : "";
+    const title = PREDICT_LABEL[prediction.label] || prediction.label;
+    predict.textContent = `${title} · ${percent}% chance the evidence stays insufficient.${when}`;
+  }
+  const reasons = document.getElementById("dashboard-predict-reasons");
+  reasons.replaceChildren();
+  const lines = (prediction && prediction.reasons) || [];
+  if (!lines.length) reasons.append(item("No failure signals on this path."));
+  for (const reason of lines) reasons.append(item(reason));
+  renderStrategyLearning(report.learning || null);
+  renderImprovement(report);
+  renderAdvanced(report.advanced || null);
+}
+
+function renderStrategyLearning(learning) {
+  const summary = document.getElementById("dashboard-strategy");
+  const list = document.getElementById("dashboard-strategy-list");
+  const retrieval = document.getElementById("dashboard-retrieval");
+  const policy = document.getElementById("dashboard-policy");
+  summary.textContent = learning ? learning.summary : "";
+  list.replaceChildren();
+  for (const row of (learning && learning.strategies) || []) {
+    const itemRow = document.createElement("li");
+    itemRow.textContent = `${row.strategy} · ${row.useful}/${row.runs} searches added evidence`;
+    list.append(itemRow);
+  }
+  if (learning && learning.retrieval) {
+    retrieval.textContent = learning.retrieval.reason;
+  } else {
+    retrieval.textContent = "";
+  }
+  policy.textContent = learning && learning.policy ? learning.policy.reason : "";
+}
+
+const ADVANCED_LABEL = {
+  failure: "Failure analysis",
+  bandit: "Bandit",
+  bayesian_retrieval: "Bayesian retrieval",
+  offline_policy: "Offline policy",
+  causal: "Causal effect",
+  consensus: "Consensus",
+  safety: "Safe adaptation",
+  governance: "Governance",
+};
+
+function renderAdvanced(advanced) {
+  const status = document.getElementById("dashboard-advanced");
+  const list = document.getElementById("dashboard-advanced-list");
+  if (!status || !list) return;
+  status.textContent = advanced ? advanced.summary : "";
+  list.replaceChildren();
+  for (const note of (advanced && advanced.notes) || []) {
+    const row = document.createElement("li");
+    const label = ADVANCED_LABEL[note.component] || note.component;
+    row.textContent = `${label} · ${note.decision} · ${note.reason}`;
+    list.append(row);
+  }
+}
+
+function skippedLabel(item) {
+  const question = (item.question || "").trim();
+  if (question.length > 72) return `${question.slice(0, 69).trim()}...`;
+  return question || item.strategy || "";
+}
+
+function renderImprovement(report) {
+  const counterfactual = report.counterfactual || null;
+  const collaboration = report.collaboration || null;
+  const benchmark = report.benchmark || null;
+  const counterStatus = document.getElementById("dashboard-counterfactual");
+  const counterList = document.getElementById("dashboard-counterfactual-list");
+  counterStatus.textContent = counterfactual ? counterfactual.summary : "";
+  counterList.replaceChildren();
+  for (const fork of (counterfactual && counterfactual.forks) || []) {
+    const row = document.createElement("li");
+    const skipped = (fork.alternatives || []).map(skippedLabel).filter(Boolean).join("; ");
+    row.textContent = skipped
+      ? `${fork.verdict} · chose ${fork.taken_strategy} · skipped ${skipped}`
+      : `${fork.verdict} · chose ${fork.taken_strategy}`;
+    counterList.append(row);
+  }
+  const agentStatus = document.getElementById("dashboard-agents");
+  const agentList = document.getElementById("dashboard-agent-list");
+  agentStatus.textContent = collaboration ? collaboration.summary : "";
+  agentList.replaceChildren();
+  for (const agent of (collaboration && collaboration.agents) || []) {
+    const row = document.createElement("li");
+    row.textContent = `${agent.name} · ${agent.useful}/${agent.searches} searches added evidence`;
+    agentList.append(row);
+  }
+  if (collaboration && collaboration.aggregator) {
+    const row = document.createElement("li");
+    row.textContent = `${collaboration.aggregator.name} · ${collaboration.aggregator.decision}`;
+    agentList.append(row);
+  }
+  const bench = document.getElementById("dashboard-benchmark");
+  const improvement = document.getElementById("dashboard-improvement");
+  bench.textContent = benchmark ? `${benchmark.trend} · ${benchmark.summary}` : "";
+  improvement.textContent = benchmark ? benchmark.improvement : "";
 }
 
 function metricCard(label, value) {
