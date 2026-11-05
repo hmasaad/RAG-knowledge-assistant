@@ -231,7 +231,7 @@
       <section id="panel-dashboard" class="panel" role="tabpanel" hidden>
         <form id="dashboard-form" class="card">
           <h2>Research intelligence</h2>
-          <p class="hint">Search, evaluate, and investigate again until the evidence is sufficient or a budget runs out. Finished paths teach the loop which strategies help, how many passages to retrieve, and when to change the next question. Each run also scores the questions it skipped, hands the work to a specialist, and compares its score with earlier runs. A discovery team then investigates the answer, challenges it, tests a hypothesis, and writes a conclusion.</p>
+          <p class="hint">Search, evaluate, and investigate again until the evidence is sufficient or a budget runs out. Finished paths teach the loop which strategies help, how many passages to retrieve, and when to change the next question. Each run also scores the questions it skipped, hands the work to a specialist, and compares its score with earlier runs. A discovery team then investigates the answer, challenges it, tests a hypothesis, and writes a conclusion. A production review then checks completeness, retrieval, citations, conflicts, adaptation, evaluation, security, and observability before the answer is released.</p>
           <label>
             Question
             <textarea id="dashboard-question" rows="3" required>What are people saying about NVIDIA?</textarea>
@@ -255,6 +255,12 @@
         </form>
         <div id="dashboard-body" hidden>
           <div id="dashboard-metrics" class="metric-grid"></div>
+          <article class="card">
+            <h2>Production review</h2>
+            <p id="dashboard-production" class="status"></p>
+            <p id="dashboard-production-revision" class="revision"></p>
+            <ol id="dashboard-production-list" class="trace-list"></ol>
+          </article>
           <div class="split">
             <article class="card">
               <h2>Trajectory evaluation</h2>

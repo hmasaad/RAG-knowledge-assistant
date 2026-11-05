@@ -431,6 +431,28 @@ class AcceptanceModel(BaseModel):
     criteria: list[AcceptanceCriterionModel]
 
 
+class ProductionRecordModel(BaseModel):
+    label: str
+    detail: str
+
+
+class ProductionAreaModel(BaseModel):
+    priority: int
+    component: str
+    title: str
+    status: str
+    score: float
+    summary: str
+    records: list[ProductionRecordModel]
+
+
+class ProductionModel(BaseModel):
+    summary: str
+    release: str
+    revision: str = ""
+    areas: list[ProductionAreaModel]
+
+
 class LoopReportModel(BaseModel):
     question: str
     asset: str
@@ -456,6 +478,7 @@ class LoopReportModel(BaseModel):
     advanced: AdvancedModel
     discovery: DiscoveryModel
     acceptance: AcceptanceModel
+    production: ProductionModel
 
 
 def _scene_or_404(asset: str) -> dict:

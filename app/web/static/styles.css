@@ -188,6 +188,12 @@ body.is-trace .panel-trace .trace {
   font-size: 0.95rem;
 }
 
+.revision {
+  white-space: pre-wrap;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
 .health.is-ok {
   color: var(--ok);
 }

@@ -607,6 +607,7 @@ function renderLearning(report) {
   renderDiscovery(report.discovery || null);
   renderSociety((report.discovery && report.discovery.society) || null);
   renderAcceptance(report.acceptance || null);
+  renderProduction(report.production || null);
 }
 
 function renderStrategyLearning(learning) {
@@ -712,6 +713,34 @@ const ACCEPTANCE_LABEL = {
   conflicts: "Conflict resolution",
   reproducibility: "Reproducibility",
 };
+
+const PRODUCTION_LABEL = {
+  completeness: "Answer quality",
+  retrieval: "Retrieval intelligence",
+  citation: "Citation integrity",
+  conflict: "Conflict and freshness",
+  adaptive: "Adaptive retrieval",
+  evaluation: "Evaluation",
+  security: "Knowledge security",
+  observability: "Observability",
+};
+
+function renderProduction(production) {
+  const status = document.getElementById("dashboard-production");
+  const revision = document.getElementById("dashboard-production-revision");
+  const list = document.getElementById("dashboard-production-list");
+  if (!status || !revision || !list) return;
+  status.textContent = production ? production.summary : "";
+  revision.textContent = production && production.revision ? production.revision : "";
+  list.replaceChildren();
+  for (const area of (production && production.areas) || []) {
+    const row = document.createElement("li");
+    const label = PRODUCTION_LABEL[area.component] || area.title || area.component;
+    const score = Number(area.score || 0).toFixed(2);
+    row.textContent = `${area.priority}. ${label} · ${area.status} · ${score} · ${area.summary}`;
+    list.append(row);
+  }
+}
 
 function renderAcceptance(acceptance) {
   const status = document.getElementById("dashboard-acceptance");

@@ -1,0 +1,81 @@
+[
+  {
+    "id": "retry-file",
+    "question": "Which file implements the retry logic?",
+    "expect_refusal": false,
+    "evidence": [
+      {
+        "filename": "api-errors.md",
+        "text": "The file that implements retry logic is app/http/retry.py."
+      }
+    ],
+    "requirements": [
+      {"detail": "app/http/retry.py", "source": "api-errors.md"}
+    ],
+    "gold_answer": "The file that implements retry logic is app/http/retry.py. [1]"
+  },
+  {
+    "id": "timeouts",
+    "question": "Where are connect and read timeouts configured?",
+    "expect_refusal": false,
+    "evidence": [
+      {
+        "filename": "api-errors.md",
+        "text": "Connect and read timeouts are configured in app/http/client.py."
+      }
+    ],
+    "requirements": [
+      {"detail": "app/http/client.py", "source": "api-errors.md"}
+    ],
+    "gold_answer": "Connect and read timeouts are configured in app/http/client.py. [1]"
+  },
+  {
+    "id": "retry-and-timeouts",
+    "question": "Which file implements the retry logic and where are timeouts configured?",
+    "expect_refusal": false,
+    "evidence": [
+      {
+        "filename": "api-errors.md",
+        "text": "The file that implements retry logic is app/http/retry.py. Connect and read timeouts are configured in app/http/client.py."
+      }
+    ],
+    "requirements": [
+      {"detail": "app/http/retry.py", "source": "api-errors.md"},
+      {"detail": "app/http/client.py", "source": "api-errors.md"}
+    ],
+    "gold_answer": "The file that implements retry logic is app/http/retry.py. [1] Connect and read timeouts are configured in app/http/client.py. [1]"
+  },
+  {
+    "id": "both-limits",
+    "question": "What is the retry limit?",
+    "expect_refusal": false,
+    "evidence": [
+      {
+        "filename": "retry-limit-three.md",
+        "text": "The retry limit is three attempts."
+      },
+      {
+        "filename": "retry-limit-five.md",
+        "text": "The retry limit is five attempts."
+      }
+    ],
+    "requirements": [
+      {"detail": "three attempts", "source": "retry-limit-three.md"},
+      {"detail": "five attempts", "source": "retry-limit-five.md"}
+    ],
+    "gold_answer": "The retry limit is three attempts. [1] The retry limit is five attempts. [2]"
+  },
+  {
+    "id": "wifi-refusal",
+    "question": "What is the office wifi password?",
+    "expect_refusal": true,
+    "evidence": [
+      {
+        "filename": "api-errors.md",
+        "text": "The file that implements retry logic is app/http/retry.py."
+      }
+    ],
+    "requirements": [],
+    "gold_answer": "I don't have enough evidence to answer."
+  }
+]

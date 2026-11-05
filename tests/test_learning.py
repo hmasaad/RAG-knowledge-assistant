@@ -202,6 +202,18 @@ def test_dashboard_shows_trajectory_evaluation_and_failure_prediction(client: Te
     ]
     assert society["consensus"]["decision"] == "dissent"
     assert "<h2>Acceptance criteria</h2>" in page.text
+    assert "<h2>Production review</h2>" in page.text
+    assert [area["component"] for area in body["production"]["areas"]] == [
+        "completeness",
+        "retrieval",
+        "citation",
+        "conflict",
+        "adaptive",
+        "evaluation",
+        "security",
+        "observability",
+    ]
+    assert body["production"]["release"] in {"release", "revise", "withhold"}
     acceptance = {item["criterion"]: item for item in body["acceptance"]["criteria"]}
     assert list(acceptance) == [
         "evidence",

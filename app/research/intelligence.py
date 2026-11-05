@@ -28,6 +28,7 @@ from app.research.learning import (
     stop_counterfactual,
     summarize_counterfactuals,
 )
+from app.research.production import evaluate_production
 
 REFUSAL = "I don't have enough evidence to answer."
 _ROLES = ("news", "social", "aggregator")
@@ -281,6 +282,7 @@ def run_research_loop(
     report["advanced"] = analyze_run(report, memory)
     report["discovery"] = discover(report)
     report["acceptance"] = measure_acceptance(report, report["discovery"])
+    report["production"] = evaluate_production(report)
     learned_from = memory
     if memory is None:
         learned_from = ResearchMemory()
